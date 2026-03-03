@@ -1,6 +1,6 @@
 {
   "name": "openclaw-plugin-minimem",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "main": "index.ts",
   "license": "MIT",
@@ -15,7 +15,9 @@
     "url": "https://github.com/gengxy1216/MiniMem/issues"
   },
   "openclaw": {
-    "extensions": ["./index.ts"]
+    "extensions": [
+      "./index.ts"
+    ]
   },
   "keywords": [
     "openclaw",
