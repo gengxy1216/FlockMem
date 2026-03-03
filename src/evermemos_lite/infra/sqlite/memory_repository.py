@@ -143,6 +143,7 @@ class MemoryRepository:
               m.id,
               m.event_id,
               m.user_id,
+              m.sender,
               m.group_id,
               m.timestamp,
               m.episode,
@@ -189,6 +190,7 @@ class MemoryRepository:
               m.id,
               m.event_id,
               m.user_id,
+              m.sender,
               m.group_id,
               m.timestamp,
               m.episode,
@@ -207,6 +209,24 @@ class MemoryRepository:
         order = {eid: idx for idx, eid in enumerate(unique_ids)}
         rows.sort(key=lambda x: order.get(str(x.get("id")), 1_000_000))
         return rows
+
+    def list_groups(self, *, user_id: str | None, limit: int = 100) -> list[dict[str, Any]]:
+        sql = """
+            SELECT
+              m.group_id,
+              COUNT(1) AS memory_count,
+              MAX(m.timestamp) AS last_timestamp
+            FROM episodic_memory m
+            WHERE m.is_deleted=0
+              AND COALESCE(TRIM(m.group_id), '')<>''
+        """
+        params: list[Any] = []
+        if user_id:
+            sql += " AND m.user_id=?"
+            params.append(user_id)
+        sql += " GROUP BY m.group_id ORDER BY last_timestamp DESC LIMIT ?"
+        params.append(max(1, int(limit)))
+        return self.engine.query_all(sql, params)
 
     def search_keyword(
         self,
@@ -310,6 +330,9 @@ class MemoryRepository:
         dedup_terms = list(dict.fromkeys(dedup_terms))
         # Keep query plan bounded on device-side workloads.
         selected = dedup_terms[:24]
+        core_terms = [t for t in selected if not str(t).startswith("cat_")]
+        if not core_terms:
+            core_terms = list(selected)
         match_query = " OR ".join(
             f'"{self._escape_fts_term(t)}"'
             for t in selected
@@ -347,26 +370,47 @@ class MemoryRepository:
         for row in rows:
             raw_text = str(row.get("search_text", "")).lower()
             lexical = 0.0
-            for term in dedup_terms:
+            for term in core_terms:
                 lexical += float(raw_text.count(term))
+            term_hits = 0
+            for term in core_terms:
+                if term and term in raw_text:
+                    term_hits += 1
+            term_coverage = float(term_hits) / float(max(1, len(core_terms)))
+            lexical_norm = min(1.0, float(lexical) / float(max(1, len(core_terms) * 2)))
+            category_bonus = 0.0
             for cat in hinted_categories:
                 if f"cat_{cat}" in raw_text:
-                    lexical += 2.2
+                    category_bonus += 0.12
             bm25_raw = row.get("bm25_score")
             try:
                 bm25_val = float(bm25_raw if bm25_raw is not None else 0.0)
             except Exception:
                 bm25_val = 0.0
             fts_score = 1.0 / (1.0 + max(0.0, bm25_val))
+            score = (
+                1.95 * float(term_coverage)
+                + 0.72 * float(lexical_norm)
+                + 0.90 * float(fts_score)
+                + float(category_bonus)
+            )
+            if len(core_terms) >= 2 and term_hits <= 1:
+                score *= 0.72
             scored.append(
                 {
                     "memory_id": row["memory_id"],
                     "bm25_score": bm25_val,
-                    "score": float(lexical * 1.15 + fts_score),
+                    "score": float(score),
                     "source": "keyword_fts",
                 }
             )
-        scored.sort(key=lambda x: float(x["score"]), reverse=True)
+        scored.sort(
+            key=lambda x: (
+                float(x.get("score", 0.0)),
+                -float(x.get("bm25_score", 0.0)),
+            ),
+            reverse=True,
+        )
         return scored[: max(1, int(top_k))]
 
     @staticmethod

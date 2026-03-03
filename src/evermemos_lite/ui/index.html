@@ -140,8 +140,8 @@
       border-right:1px solid var(--line);
       background:var(--sidebar);
       padding:10px 8px;
-      display:grid;
-      grid-template-rows:auto auto auto auto minmax(0,1fr);
+      display:flex;
+      flex-direction:column;
       gap:4px;
       overflow:hidden;
     }
@@ -157,6 +157,29 @@
       color:var(--muted);
       display:grid;
       gap:4px;
+    }
+    .group-picker{
+      padding:2px 0 8px;
+      display:grid;
+      gap:4px;
+    }
+    .group-picker .row{
+      flex-wrap:nowrap;
+      gap:6px;
+    }
+    #group_selector{
+      flex:1;
+      min-height:34px;
+      padding:6px 8px;
+      border-radius:8px;
+    }
+    #btn_group_refresh{
+      min-height:34px;
+      padding:6px 10px;
+      border:1px solid var(--line);
+      border-radius:8px;
+      white-space:nowrap;
+      color:var(--muted);
     }
     .nav{display:grid;gap:2px}
     .nav button{
@@ -176,6 +199,7 @@
       border:0;
       border-radius:0;
       background:transparent;
+      flex:1;
       display:grid;
       grid-template-rows:auto 1fr;
       min-height:200px;
@@ -966,7 +990,6 @@
         overflow:visible;
         border-right:0;
         border-bottom:1px solid var(--line);
-        grid-template-rows:auto auto auto;
       }
       .nav{grid-template-columns:repeat(3,minmax(0,1fr))}
       .main{padding:10px}
@@ -1020,6 +1043,13 @@
           <button id="btn_logout" type="button" aria-label="Sign out">Sign out</button>
         </div>
         <div class="whoami"><div id="chip_user">user: -</div><div id="chip_group">group: -</div></div>
+        <div class="group-picker">
+          <label class="label" for="group_selector" style="margin-bottom:0">active group</label>
+          <div class="row">
+            <select id="group_selector" aria-label="Active group selector"></select>
+            <button id="btn_group_refresh" type="button">刷新</button>
+          </div>
+        </div>
         <button id="btn_new_session" class="primary" type="button">New Chat</button>
         <nav class="nav" aria-label="主导航">
           <button class="nav-btn active" data-page="chat" data-i18n-key="nav.chat" type="button">Chat</button>
@@ -1295,6 +1325,33 @@
       custom:{base_url:"",api_key:"",model:"Qwen/Qwen3-8B"}
     };
     const auth={username:"",groupId:DEFAULT_GROUP_ID};
+    function defaultGroupIdForUser(username){
+      const u=String(username||"").trim();
+      return u ? `default:${u}` : DEFAULT_GROUP_ID;
+    }
+    function normalizeGroupIdForUser(groupId,username){
+      if(groupId!==undefined&&groupId!==null){
+        return String(groupId).trim();
+      }
+      return defaultGroupIdForUser(username);
+    }
+    function resolveQueryScope(){
+      const groupId=String(auth.groupId||"").trim();
+      const ownDefault=defaultGroupIdForUser(auth.username);
+      if(!groupId){
+        return {userId:"",groupId:""};
+      }
+      if(groupId===ownDefault){
+        return {userId:String(auth.username||"").trim(),groupId};
+      }
+      if(groupId.startsWith("default:")){
+        const derived=groupId.slice("default:".length).trim();
+        if(derived){
+          return {userId:derived,groupId};
+        }
+      }
+      return {userId:"",groupId};
+    }
     const I18N_TEXT={
       en:{
         "sidebar.user":"user",
@@ -1689,7 +1746,7 @@
       try{
         const v=JSON.parse(raw);
         auth.username=v.username||"";
-        auth.groupId=v.groupId||DEFAULT_GROUP_ID;
+        auth.groupId=normalizeGroupIdForUser(v.groupId,auth.username);
         return !!auth.username;
       }catch{
         return false;
@@ -1772,7 +1829,74 @@
 
     function renderAuth(){
       qs("chip_user").textContent=`${t("sidebar.user")}: ${auth.username||"-"}`;
-      qs("chip_group").textContent=`${t("sidebar.group")}: ${auth.groupId||"-"}`;
+      qs("chip_group").textContent=`${t("sidebar.group")}: ${auth.groupId||"ALL"}`;
+    }
+    function normalizeGroupRows(data){
+      const rows=data?.result?.groups;
+      if(!Array.isArray(rows))return [];
+      return rows
+        .map((row)=>({
+          group_id:String(row?.group_id||"").trim(),
+          memory_count:Number(row?.memory_count||0),
+          last_timestamp:Number(row?.last_timestamp||0),
+        }))
+        .filter((row)=>row.group_id);
+    }
+    function renderGroupOptions(rows){
+      const select=qs("group_selector");
+      if(!select)return;
+      const current=String(auth.groupId||"").trim();
+      const map=new Map();
+      const addOption=(gid,count)=>{
+        const key=String(gid||"").trim();
+        if(!key||map.has(key))return;
+        map.set(key,Number(count||0));
+      };
+      addOption(defaultGroupIdForUser(auth.username),0);
+      if(current)addOption(current,0);
+      for(const row of rows){
+        addOption(row.group_id,row.memory_count);
+      }
+      const options=["<option value=''>ALL groups</option>"];
+      for(const [gid,count] of map.entries()){
+        const suffix=count>0?` (${count})`:"";
+        options.push(`<option value='${safe(gid)}'>${safe(gid+suffix)}</option>`);
+      }
+      select.innerHTML=options.join("");
+      select.value=current;
+      if(select.value!==current){
+        select.value=current&&map.has(current)?current:"";
+      }
+    }
+    function applyActiveGroup(groupId,{refreshManage=false}={}){
+      const next=String(groupId||"").trim();
+      if(next===auth.groupId)return;
+      auth.groupId=next;
+      saveAuth();
+      renderAuth();
+      if(refreshManage&&state.page==="manage"){
+        manageFetch();
+      }
+    }
+    async function refreshGroupOptions({silent=false}={}){
+      const btn=qs("btn_group_refresh");
+      buttonBusy(btn,true,"刷新中...");
+      try{
+        if(!auth.username){
+          renderGroupOptions([]);
+          return;
+        }
+        const url=new URL("/api/v1/memories/groups",location.origin);
+        url.searchParams.set("limit","200");
+        const data=await api(url.pathname+url.search);
+        renderGroupOptions(normalizeGroupRows(data));
+        if(!silent)setGlobalStatus("group list loaded");
+      }catch(err){
+        renderGroupOptions([]);
+        if(!silent)setGlobalStatus("group list failed",false);
+      }finally{
+        buttonBusy(btn,false);
+      }
     }
     function showLogin(){
       qs("login_view").classList.remove("hidden");
@@ -1823,9 +1947,11 @@
       }
       const body = rows.map((m)=>{
         const score=Number(m?.importance_score||0);
-        const summary=String(m?.summary||m?.episode||"").trim();
+        const summary=String(m?.content||m?.summary||m?.episode||"").trim();
         const subject=String(m?.subject||"-");
         const source=String(m?.source||"memory");
+        const sender=String(m?.sender||m?.user_id||"-");
+        const groupId=String(m?.group_id||"-");
         const tier=String(m?.storage_tier||"text_only");
         const sceneId=String(m?.scene_id||"-");
         const eventId=String(m?.event_id||"").trim();
@@ -1839,6 +1965,8 @@
           `<td>${safe(tier)}</td>`+
           `<td>${safe(sceneId)}</td>`+
           `<td>${safe(source)}</td>`+
+          `<td>${safe(sender)}</td>`+
+          `<td>${safe(groupId)}</td>`+
           `<td>${safe(subject)}</td>`+
           `<td class='summary'>${safe(summary||"-")}</td>`+
           `<td class='mono'>${safe(memoryId)}</td>`+
@@ -1855,8 +1983,8 @@
         "<div class='dense-table-wrap'>"+
         "<table class='dense-table'>"+
         "<thead><tr>"+
-        "<th>time</th><th>imp</th><th>tier</th><th>scene</th><th>source</th>"+
-        "<th>subject</th><th>summary</th><th>memory_id</th><th>event_id</th><th>action</th>"+
+        "<th>time</th><th>imp</th><th>tier</th><th>scene</th><th>source</th><th>sender</th><th>group_id</th>"+
+        "<th>subject</th><th>content</th><th>memory_id</th><th>event_id</th><th>action</th>"+
         "</tr></thead>"+
         `<tbody>${body}</tbody>`+
         "</table>"+
@@ -2039,12 +2167,15 @@
       state.sending=true;
       buttonBusy(btn,true,"发送中...");
       try{
+        const scope=resolveQueryScope();
+        const chatUserId=scope.userId||String(auth.username||"").trim()||"anonymous";
+        const chatGroupId=scope.groupId||defaultGroupIdForUser(chatUserId);
         const data=await api("/api/v1/chat/simple",{
           method:"POST",
           body:{
             query:q,
-            user_id:auth.username,
-            group_id:auth.groupId,
+            user_id:chatUserId,
+            group_id:chatGroupId,
             top_k:topK,
             provider:sess.provider||selectedProvider,
             conversation_id:sess.id
@@ -2153,9 +2284,10 @@
       const btn=qs("btn_manage_fetch");
       buttonBusy(btn,true);
       try{
+        const scope=resolveQueryScope();
         const url=new URL("/api/v1/memories",location.origin);
-        url.searchParams.set("user_id",auth.username);
-        url.searchParams.set("group_id",auth.groupId);
+        if(scope.userId)url.searchParams.set("user_id",scope.userId);
+        if(scope.groupId)url.searchParams.set("group_id",scope.groupId);
         url.searchParams.set("limit","60");
         const data=await api(url.pathname+url.search);
         renderManageList(extractMemoriesFromPayload(data));
@@ -2178,10 +2310,11 @@
       }
       buttonBusy(btn,true);
       try{
+        const scope=resolveQueryScope();
         const url=new URL("/api/v1/memories/search",location.origin);
         url.searchParams.set("query",q);
-        url.searchParams.set("user_id",auth.username);
-        url.searchParams.set("group_id",auth.groupId);
+        if(scope.userId)url.searchParams.set("user_id",scope.userId);
+        if(scope.groupId)url.searchParams.set("group_id",scope.groupId);
         url.searchParams.set("retrieve_method",qs("manage_method").value);
         url.searchParams.set("decision_mode",qs("manage_decision").value);
         url.searchParams.set("top_k","20");
@@ -2692,6 +2825,7 @@
         setGraphStatus("query is required",false);
         return;
       }
+      const scope=resolveQueryScope();
       graphState.mode=mode;
       const limit=Math.max(1,Math.min(100,Number(qs("graph_limit").value||20)));
       buttonBusy(btn,true,t("graph.status.running"));
@@ -2703,8 +2837,8 @@
         }else{
           url.searchParams.set("query",query);
         }
-        url.searchParams.set("user_id",auth.username);
-        url.searchParams.set("group_id",auth.groupId);
+        if(scope.userId)url.searchParams.set("user_id",scope.userId);
+        if(scope.groupId)url.searchParams.set("group_id",scope.groupId);
         url.searchParams.set("limit",String(limit));
         const data=await api(url.pathname+url.search);
         const rows=normalizeGraphRows(data?.result?.items);
@@ -2854,7 +2988,7 @@
         if(!u||!p){status.innerHTML="<span class='err'>请输入用户名和密码</span>";return;}
         if(!verifyUser(u,p)){status.innerHTML="<span class='err'>用户名或密码错误</span>";return;}
         auth.username=u;
-        auth.groupId=auth.groupId||DEFAULT_GROUP_ID;
+        auth.groupId=normalizeGroupIdForUser(auth.groupId,u);
         saveAuth();
         showApp();
         bootstrapAfterLogin();
@@ -2870,6 +3004,12 @@
         state.sessions.unshift(created);
         saveSessions();
         activateSession(created.id,{switchToChat:true});
+      });
+      qs("group_selector").addEventListener("change",(e)=>{
+        applyActiveGroup(e.target.value,{refreshManage:true});
+      });
+      qs("btn_group_refresh").addEventListener("click",()=>{
+        refreshGroupOptions();
       });
       qs("chat_provider").addEventListener("change",(e)=>setSessionProvider(e.target.value));
       qs("chat_form").addEventListener("submit",(e)=>{e.preventDefault();sendChat()});
@@ -2959,7 +3099,11 @@
     }
 
     function bootstrapAfterLogin(){
+      auth.groupId=normalizeGroupIdForUser(auth.groupId,auth.username);
+      saveAuth();
       renderAuth();
+      renderGroupOptions([]);
+      refreshGroupOptions({silent:true});
       loadSessions();
       ensureSession();
       renderSessions();

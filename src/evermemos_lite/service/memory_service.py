@@ -175,11 +175,21 @@ class MemoryService:
             sender=payload.sender,
             group_id=payload.group_id,
         )
+        raw_episode = str(payload.content or "").strip()
+        extracted_episode = str(extracted.episode or "").strip()
+        if (
+            self._looks_encoding_broken(extracted_episode)
+            and not self._looks_encoding_broken(raw_episode)
+            and raw_episode
+        ):
+            episode_text = raw_episode
+        else:
+            episode_text = extracted_episode or raw_episode
         extracted_importance = float(extracted.importance_score)
         if extracted_importance <= 0.01:
-            extracted_importance = self.estimate_importance(extracted.episode)
+            extracted_importance = self.estimate_importance(episode_text)
         triples = extract_graph_triples(
-            facts=list(extracted.atomic_facts) or [extracted.episode],
+            facts=list(extracted.atomic_facts) or [episode_text],
             user_id=payload.sender,
         )
         has_entity_relation = bool(triples)
@@ -188,7 +198,7 @@ class MemoryService:
             has_entity_relation=has_entity_relation,
         )
         memory_category = self._decide_memory_category(
-            episode=extracted.episode,
+            episode=episode_text,
             summary=extracted.summary,
             subject=extracted.subject,
             atomic_facts=list(extracted.atomic_facts),
@@ -200,7 +210,7 @@ class MemoryService:
             message_id=payload.message_id,
             create_time=int(payload.create_time),
             sender=payload.sender,
-            content=extracted.episode,
+            content=episode_text,
             user_id=payload.sender,
             group_id=payload.group_id,
             group_name=payload.group_name,
@@ -224,7 +234,7 @@ class MemoryService:
                 event_id=episode["event_id"],
                 memory_id=episode["id"],
                 timestamp=int(payload.create_time),
-                episode=extracted.episode,
+                episode=episode_text,
                 summary=extracted.summary,
                 importance_score=float(extracted_importance),
                 atomic_facts=list(extracted.atomic_facts),
@@ -254,6 +264,17 @@ class MemoryService:
             "memory_category": memory_category,
             "scene_id": episode.get("scene_id"),
         }
+
+    @staticmethod
+    def _looks_encoding_broken(text: str) -> bool:
+        raw = str(text or "").strip()
+        if not raw:
+            return False
+        q_count = raw.count("?")
+        if len(raw) >= 4 and q_count >= max(2, len(raw) // 3):
+            return True
+        markers = ("Ã", "Â", "ä", "å", "æ", "ç", "è", "é", "ï", "ð", "椋", "炰", "锟")
+        return any(m in raw for m in markers)
 
     def maybe_index_vector(self, policy: EffectivePolicy, episode: dict[str, Any]) -> dict[str, Any]:
         if not policy.vector_enabled:
@@ -505,7 +526,7 @@ class MemoryService:
             ms_profile=round((after_profile - after_base) * 1000.0, 3),
             ms_graph=round((end - after_profile) * 1000.0, 3),
         )
-        return merged
+        return self._strip_internal_search_fields(merged)
 
     def retrieve_live_segment_context(
         self, *, conversation_id: str, query: str, limit: int = 2
@@ -562,9 +583,12 @@ class MemoryService:
         vec_ms = 0.0
         hydrate_ms = 0.0
         foresight_ms = 0.0
+        vector_probe_error = False
+        vector_probe_error_reason = ""
         keyword_hits: list[dict[str, Any]] = []
         vector_hits: list[dict[str, Any]] = []
         top = max(1, int(top_k))
+        pool_top = max(top, min(200, max(top * 3, top + 6)))
         budget_multiplier = max(2, int(self.search_budget_factor))
         min_probe = max(4, int(self.search_min_probe_k))
         id_like_query = self._is_id_like_query(query)
@@ -605,7 +629,7 @@ class MemoryService:
         if run_vector_probe:
             try:
                 vec_started = time.perf_counter()
-                vector = self._embed_query(query)
+                vector = self._fit_vector_dim(self._embed_query(query))
                 vector_hits = self.vector_store.search(
                     vector=vector,
                     top_k=vector_budget,
@@ -617,22 +641,25 @@ class MemoryService:
                 for row in vector_hits:
                     row["source"] = "vector"
                     row["in_vector_hits"] = True
-            except Exception:
+            except Exception as exc:
+                vector_probe_error = True
+                vector_probe_error_reason = str(exc)[:180]
                 vector_hits = []
 
         merge_strategy = "none"
         if keyword_hits and vector_hits:
-            if self._should_prefer_vector_for_semantic(
+            prefer_vector = self._should_prefer_vector_for_semantic(
                 query=query,
                 id_like_query=id_like_query,
                 keyword_hits=keyword_hits,
                 vector_hits=vector_hits,
                 top_k=top,
-            ):
-                hit_rows = self._vector_priority_merge(
+            )
+            if prefer_vector:
+                base_candidates = self._vector_priority_merge(
                     vector_hits=vector_hits,
                     keyword_hits=keyword_hits,
-                    top_k=top,
+                    top_k=pool_top,
                 )
                 merge_strategy = "semantic_vector_priority"
             else:
@@ -649,14 +676,34 @@ class MemoryService:
                         "in_vector_hits",
                         any(x.get("memory_id") == row.get("memory_id") for x in vector_hits),
                     )
-                hit_rows = fused[:top]
+                base_candidates = fused[:pool_top]
                 merge_strategy = "hybrid_rrf"
+            hit_rows = self._rerank_basic_hit_candidates(
+                candidates=base_candidates,
+                keyword_hits=keyword_hits,
+                vector_hits=vector_hits,
+                top_k=pool_top,
+                prefer_vector=prefer_vector,
+            )
+            merge_strategy = f"{merge_strategy}_rerank"
         elif keyword_hits:
-            hit_rows = keyword_hits[:top]
-            merge_strategy = "keyword_only"
+            hit_rows = self._rerank_basic_hit_candidates(
+                candidates=keyword_hits[:pool_top],
+                keyword_hits=keyword_hits,
+                vector_hits=[],
+                top_k=pool_top,
+                prefer_vector=False,
+            )
+            merge_strategy = "keyword_only_rerank"
         elif vector_hits:
-            hit_rows = vector_hits[:top]
-            merge_strategy = "vector_only"
+            hit_rows = self._rerank_basic_hit_candidates(
+                candidates=vector_hits[:pool_top],
+                keyword_hits=[],
+                vector_hits=vector_hits,
+                top_k=pool_top,
+                prefer_vector=True,
+            )
+            merge_strategy = "vector_only_rerank"
         else:
             hit_rows = []
 
@@ -677,6 +724,8 @@ class MemoryService:
             base["in_vector_hits"] = bool(hit.get("in_vector_hits", False))
             base["in_keyword_hits"] = bool(hit.get("in_keyword_hits", False))
             rows.append(base)
+        if rows:
+            rows = self._rerank_basic_result_rows(query=query, rows=rows)
 
         if not rows:
             rows = self._fallback_recent(
@@ -690,6 +739,11 @@ class MemoryService:
                 end_ts=end_ts,
             )
         limited = rows[:top]
+        self._attach_vector_probe_diag(
+            rows=limited,
+            has_error=vector_probe_error,
+            error_reason=vector_probe_error_reason,
+        )
         if not attach_foresight:
             self._emit_search_trace(
                 "basic_search",
@@ -701,6 +755,8 @@ class MemoryService:
                 vector_budget=vector_budget,
                 keyword_hits=len(keyword_hits),
                 vector_hits=len(vector_hits),
+                vector_probe_error=bool(vector_probe_error),
+                vector_probe_error_reason=vector_probe_error_reason,
                 merge_strategy=merge_strategy,
                 output_count=len(limited),
                 foresight_attached=False,
@@ -720,6 +776,11 @@ class MemoryService:
             start_ts=start_ts,
             end_ts=end_ts,
         )
+        self._attach_vector_probe_diag(
+            rows=final_rows,
+            has_error=vector_probe_error,
+            error_reason=vector_probe_error_reason,
+        )
         foresight_ms = (time.perf_counter() - foresight_started) * 1000.0
         self._emit_search_trace(
             "basic_search",
@@ -731,6 +792,8 @@ class MemoryService:
             vector_budget=vector_budget,
             keyword_hits=len(keyword_hits),
             vector_hits=len(vector_hits),
+            vector_probe_error=bool(vector_probe_error),
+            vector_probe_error_reason=vector_probe_error_reason,
             merge_strategy=merge_strategy,
             output_count=len(final_rows),
             foresight_attached=True,
@@ -873,12 +936,16 @@ class MemoryService:
                 start_ts=start_ts,
                 end_ts=end_ts,
             )
+        vector_probe_error, vector_probe_error_reason = (
+            self._extract_vector_probe_diag(hits)
+        )
         sufficiency = self._assess_retrieval_sufficiency(query=query, hits=hits, top_k=top_k)
         if self._should_skip_agentic_second_round(
             query=query,
             hits=hits,
             top_k=top_k,
             sufficiency=sufficiency,
+            vector_probe_error=vector_probe_error,
         ):
             final_rows = self._attach_valid_foresight(
                 rows=hits[: max(1, top_k)],
@@ -898,6 +965,8 @@ class MemoryService:
                 sufficiency_confidence=round(float(sufficiency.confidence), 3),
                 first_round_count=len(hits),
                 output_count=len(final_rows),
+                vector_probe_error=bool(vector_probe_error),
+                vector_probe_error_reason=vector_probe_error_reason,
                 ms_total=round((time.perf_counter() - started_at) * 1000.0, 3),
             )
             return final_rows
@@ -910,8 +979,14 @@ class MemoryService:
             query=query, hits=hits, sufficiency=sufficiency
         )
         rewritten = rewrite_plan.query
-        if not candidate_ids and (
-            rewritten.strip() == query.strip() or bool(sufficiency.sufficient)
+        llm_sufficient = bool(
+            sufficiency.sufficient and str(sufficiency.source) == "llm_verifier"
+        )
+        if (
+            not vector_probe_error
+            and not candidate_ids
+            and rewritten.strip() == query.strip()
+            and llm_sufficient
         ):
             final_rows = self._attach_valid_foresight(
                 rows=hits[: max(1, top_k)],
@@ -934,6 +1009,8 @@ class MemoryService:
                 first_round_count=len(hits),
                 candidate_count=0,
                 output_count=len(final_rows),
+                vector_probe_error=bool(vector_probe_error),
+                vector_probe_error_reason=vector_probe_error_reason,
                 ms_scene=round(scene_ms, 3),
                 ms_total=round((time.perf_counter() - started_at) * 1000.0, 3),
             )
@@ -985,6 +1062,8 @@ class MemoryService:
                 second_round_count=len(second),
                 candidate_count=len(candidate_ids),
                 output_count=len(final_rows),
+                vector_probe_error=bool(vector_probe_error),
+                vector_probe_error_reason=vector_probe_error_reason,
                 ms_scene=round(scene_ms, 3),
                 ms_total=round((time.perf_counter() - started_at) * 1000.0, 3),
             )
@@ -1011,6 +1090,8 @@ class MemoryService:
             output_count=len(final_rows),
             rewrite_source=rewrite_plan.source,
             rewrite_confidence=round(float(rewrite_plan.confidence), 3),
+            vector_probe_error=bool(vector_probe_error),
+            vector_probe_error_reason=vector_probe_error_reason,
             ms_scene=round(scene_ms, 3),
             ms_total=round((time.perf_counter() - started_at) * 1000.0, 3),
         )
@@ -1041,13 +1122,37 @@ class MemoryService:
     ) -> bool:
         if id_like_query or self._is_identity_query(query):
             return False
+        if self._is_temporal_query(query) or self._is_precision_sensitive_query(query):
+            return False
         if len(str(query or "").strip()) < 16:
             return False
         if not vector_hits:
             return False
         if self._is_keyword_confident(keyword_hits, min(max(1, int(top_k)), 2)):
             return False
-        return True
+        top_vector_score = max(float(x.get("score", 0.0)) for x in vector_hits)
+        if top_vector_score < 0.22:
+            return False
+        probe_width = max(4, min(len(vector_hits), max(2, int(top_k)) * 2))
+        keyword_probe = {
+            str(x.get("memory_id"))
+            for x in keyword_hits[:probe_width]
+            if str(x.get("memory_id", "")).strip()
+        }
+        vector_probe = {
+            str(x.get("memory_id"))
+            for x in vector_hits[:probe_width]
+            if str(x.get("memory_id", "")).strip()
+        }
+        has_channel_overlap = bool(keyword_probe & vector_probe)
+        if not has_channel_overlap:
+            return False
+        min_keyword_hits = min(max(1, int(top_k)), 2)
+        if len(keyword_hits) < min_keyword_hits:
+            return has_channel_overlap
+        top_keyword_score = max(float(x.get("score", 0.0)) for x in keyword_hits)
+        # Prefer vector-only priority when lexical retrieval is weak.
+        return top_keyword_score < 0.25
 
     @staticmethod
     def _vector_priority_merge(
@@ -1093,6 +1198,97 @@ class MemoryService:
                 break
         return out[:top]
 
+    @staticmethod
+    def _rank_to_unit_score(rank: int | None, total: int) -> float:
+        if rank is None or rank <= 0 or total <= 0:
+            return 0.0
+        return float(total - rank + 1) / float(total)
+
+    def _rerank_basic_hit_candidates(
+        self,
+        *,
+        candidates: list[dict[str, Any]],
+        keyword_hits: list[dict[str, Any]],
+        vector_hits: list[dict[str, Any]],
+        top_k: int,
+        prefer_vector: bool,
+    ) -> list[dict[str, Any]]:
+        if not candidates:
+            return []
+        kw_rank = {
+            str(row.get("memory_id")): idx
+            for idx, row in enumerate(keyword_hits, start=1)
+            if row.get("memory_id")
+        }
+        vec_rank = {
+            str(row.get("memory_id")): idx
+            for idx, row in enumerate(vector_hits, start=1)
+            if row.get("memory_id")
+        }
+        total_kw = max(1, len(keyword_hits))
+        total_vec = max(1, len(vector_hits))
+        total_candidates = max(1, len(candidates))
+        weighted: list[dict[str, Any]] = []
+        for idx, row in enumerate(candidates, start=1):
+            mid = str(row.get("memory_id", "")).strip()
+            if not mid:
+                continue
+            item = dict(row)
+            kw_score = self._rank_to_unit_score(kw_rank.get(mid), total_kw)
+            vec_score = self._rank_to_unit_score(vec_rank.get(mid), total_vec)
+            base_score = self._rank_to_unit_score(idx, total_candidates)
+            dual_score = 1.0 if (mid in kw_rank and mid in vec_rank) else 0.0
+            if prefer_vector:
+                channel_score = (
+                    0.56 * vec_score
+                    + 0.24 * kw_score
+                    + 0.12 * base_score
+                    + 0.08 * dual_score
+                )
+            else:
+                channel_score = (
+                    0.44 * vec_score
+                    + 0.34 * kw_score
+                    + 0.14 * base_score
+                    + 0.08 * dual_score
+                )
+            item["retrieval_channel_score"] = round(float(channel_score), 4)
+            item["score"] = float(channel_score)
+            item["in_keyword_hits"] = bool(item.get("in_keyword_hits", mid in kw_rank))
+            item["in_vector_hits"] = bool(item.get("in_vector_hits", mid in vec_rank))
+            weighted.append(item)
+        weighted.sort(key=lambda x: float(x.get("score", 0.0)), reverse=True)
+        return weighted[: max(1, int(top_k))]
+
+    def _rerank_basic_result_rows(self, *, query: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not rows:
+            return rows
+        weighted: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            text = " ".join(
+                [
+                    str(item.get("summary", "")),
+                    str(item.get("episode", "")),
+                    str(item.get("subject", "")),
+                ]
+            ).strip()
+            overlap = self._lexical_overlap_ratio(query, text) if text else 0.0
+            dual_bonus = (
+                1.0
+                if bool(item.get("in_keyword_hits", False))
+                and bool(item.get("in_vector_hits", False))
+                else 0.0
+            )
+            base = float(item.get("score", 0.0))
+            item["query_overlap_bonus"] = round(float(overlap), 4)
+            item["score"] = float(base) + 0.16 * float(overlap) + 0.04 * float(dual_bonus)
+            weighted.append(item)
+        weighted.sort(key=lambda x: float(x.get("score", 0.0)), reverse=True)
+        if self.phase4_reasoning_enabled and self._is_temporal_query(query):
+            return self._rerank_temporal_rows(query=query, rows=weighted)
+        return weighted
+
     def _should_skip_agentic_second_round(
         self,
         *,
@@ -1100,7 +1296,10 @@ class MemoryService:
         hits: list[dict[str, Any]],
         top_k: int,
         sufficiency: RetrievalSufficiency | None = None,
+        vector_probe_error: bool = False,
     ) -> bool:
+        if vector_probe_error:
+            return False
         if sufficiency and sufficiency.source == "llm_verifier":
             return bool(sufficiency.sufficient)
         if self._is_id_like_query(query):
@@ -1109,13 +1308,51 @@ class MemoryService:
             return self._is_sufficient(hits, top_k)
         if not hits:
             return False
+        usable_hits = [
+            h for h in hits if str(h.get("source", "")).strip().lower() != "fallback_recent"
+        ]
+        if not usable_hits:
+            return False
+        ranked = sorted((float(h.get("score", 0.0)) for h in usable_hits), reverse=True)
+        best = ranked[0] if ranked else 0.0
+        second = ranked[1] if len(ranked) > 1 else 0.0
+        complex_query = (
+            self._is_multi_hop_query(query)
+            or self._is_temporal_query(query)
+            or self._is_precision_sensitive_query(query)
+        )
+        unique_sources = {
+            str(h.get("source", "")).strip().lower() for h in usable_hits if h.get("source")
+        }
+        has_dual_hit = any(
+            bool(h.get("in_keyword_hits", False)) and bool(h.get("in_vector_hits", False))
+            for h in usable_hits
+        )
         if sufficiency is not None and bool(sufficiency.sufficient):
+            if complex_query:
+                return (
+                    best >= 0.56
+                    and second >= 0.40
+                    and (len(unique_sources) >= 2 or has_dual_hit)
+                )
+            return best >= 0.48 and second >= 0.30
+        if complex_query:
+            return (
+                best >= 0.52
+                and second >= 0.34
+                and len(usable_hits) >= max(2, min(3, top_k))
+                and (len(unique_sources) >= 2 or has_dual_hit)
+            )
+        if len(usable_hits) == 1:
+            only_src = str(usable_hits[0].get("source", "")).strip().lower()
+            if only_src == "vector" and best >= 0.58:
+                return True
+            return best >= 0.60
+        if best >= 0.42 and second >= 0.28:
             return True
-        best = max(float(h.get("score", 0.0)) for h in hits)
-        if best >= 0.12:
-            return True
-        if len(hits) >= max(2, min(3, top_k)):
-            return True
+        if best >= 0.34 and len(usable_hits) >= max(2, min(3, top_k)):
+            if len(unique_sources) >= 2 or has_dual_hit:
+                return True
         return False
 
     def _assess_retrieval_sufficiency(
@@ -1331,6 +1568,24 @@ class MemoryService:
                     queries.append(q)
                     if len(queries) >= max_queries:
                         break
+        if len(queries) < max_queries:
+            extras = self._expand_temporal_boundary_queries(
+                seed=seed,
+                original_query=original_query,
+                insufficiency_reason=insufficiency_reason,
+            )
+            seen = {q.lower() for q in queries}
+            for item in extras:
+                q = " ".join(str(item or "").strip().split())
+                if not q:
+                    continue
+                key = q.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                queries.append(q)
+                if len(queries) >= max_queries:
+                    break
         if (
             self.phase4_reasoning_enabled
             and self._is_multi_hop_query(original_query)
@@ -1350,6 +1605,57 @@ class MemoryService:
                 if len(queries) >= max_queries:
                     break
         return queries[:max_queries]
+
+    def _expand_temporal_boundary_queries(
+        self,
+        *,
+        seed: str,
+        original_query: str,
+        insufficiency_reason: str,
+    ) -> list[str]:
+        base = " ".join(str(seed or "").strip().split())
+        if not base:
+            return []
+        q = str(original_query or "").strip().lower()
+        reason = str(insufficiency_reason or "").strip().lower()
+        extras: list[str] = []
+        temporal_needed = self._is_temporal_query(original_query) or any(
+            term in reason
+            for term in (
+                "time",
+                "timeline",
+                "date",
+                "when",
+                "时序",
+                "时间",
+                "先后",
+            )
+        )
+        if temporal_needed:
+            target_year = self._extract_target_year(original_query)
+            if target_year is not None:
+                extras.append(f"{base} {target_year} 时间线 关键事件")
+            extras.append(f"{base} 时间 顺序 先后")
+            if any(term in q for term in ("latest", "recent", "最近", "刚刚", "newest")):
+                extras.append(f"{base} 最近 最新 进展")
+            if any(term in q for term in ("earliest", "first", "最早", "起初")):
+                extras.append(f"{base} 最早 起因 背景")
+        if any(term in reason for term in ("who", "person", "entity", "人物", "角色", "参与")):
+            extras.append(f"{base} 人物 参与者 关系")
+        if any(term in reason for term in ("where", "location", "place", "地点", "场景")):
+            extras.append(f"{base} 地点 场景 背景")
+        if not extras and self._is_multi_hop_query(original_query):
+            extras.append(f"{base} 关键细节 关联线索")
+        dedup: list[str] = []
+        seen: set[str] = set()
+        for item in extras:
+            qx = " ".join(str(item or "").strip().split())
+            key = qx.lower()
+            if not qx or key in seen:
+                continue
+            seen.add(key)
+            dedup.append(qx)
+        return dedup[:3]
 
     def _rerank_query_overlap_rows(
         self, *, rows: list[dict[str, Any]], query_variants: list[str]
@@ -1461,6 +1767,46 @@ class MemoryService:
         )
         return any(t in q for t in terms)
 
+    @staticmethod
+    def _is_precision_sensitive_query(query: str) -> bool:
+        q = str(query or "").strip().lower()
+        if not q:
+            return False
+        english_patterns = (
+            r"\bwhen\b",
+            r"\bwhat\s+time\b",
+            r"\bhow\s+many\b",
+            r"\bhow\s+long\b",
+            r"\bwhy\b",
+            r"\breason\b",
+            r"\bcause\b",
+            r"\bduration\b",
+            r"\bcount\b",
+            r"\bnumber\s+of\b",
+            r"\badvice\b",
+            r"\bsuggest(?:ion|ed)?\b",
+            r"\bshould\b",
+        )
+        if any(re.search(pattern, q) for pattern in english_patterns):
+            return True
+        chinese_terms = (
+            "什么时候",
+            "几点",
+            "何时",
+            "多久",
+            "多长时间",
+            "多少次",
+            "多少",
+            "原因",
+            "为什么",
+            "建议",
+            "应该",
+            "时长",
+            "持续",
+            "频率",
+        )
+        return any(term in q for term in chinese_terms)
+
     def _rerank_temporal_rows(self, *, query: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not rows:
             return rows
@@ -1560,7 +1906,7 @@ class MemoryService:
             user_id=user_id, group_id=group_id, limit=max(20, top_scene_n * 4)
         )
         try:
-            q_vec = _safe_vector(self._embed_query(query))
+            q_vec = _safe_vector(self._fit_vector_dim(self._embed_query(query)))
         except Exception:
             q_vec = []
         scored: list[tuple[str, float]] = []
@@ -1579,6 +1925,41 @@ class MemoryService:
             "scene_score_map": {sid: s for sid, s in scored},
             "episode_scene_map": self.repo.get_episode_scene_map(episode_ids),
         }
+
+    @staticmethod
+    def _attach_vector_probe_diag(
+        *,
+        rows: list[dict[str, Any]],
+        has_error: bool,
+        error_reason: str,
+    ) -> None:
+        if not rows:
+            return
+        reason = str(error_reason or "").strip()[:180]
+        for row in rows:
+            row["_vector_probe_error"] = bool(has_error)
+            if has_error and reason:
+                row["_vector_probe_error_reason"] = reason
+
+    @staticmethod
+    def _extract_vector_probe_diag(rows: list[dict[str, Any]]) -> tuple[bool, str]:
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if bool(row.get("_vector_probe_error", False)):
+                reason = str(row.get("_vector_probe_error_reason", "")).strip()[:180]
+                return True, reason
+        return False, ""
+
+    @staticmethod
+    def _strip_internal_search_fields(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            internal = [k for k in row.keys() if str(k).startswith("_")]
+            for key in internal:
+                row.pop(key, None)
+        return rows
 
     def _decide_storage_tier(self, *, importance: float, has_entity_relation: bool) -> str:
         is_vector_candidate = float(importance) >= self.vector_write_min_importance

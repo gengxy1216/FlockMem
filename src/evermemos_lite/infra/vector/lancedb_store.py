@@ -159,8 +159,10 @@ class LanceVectorStore:
         candidate_episode_ids: set[str] | None,
     ) -> list[dict[str, Any]]:
         limit = max(24, int(top_k) * 6)
-        heap: list[tuple[float, dict[str, Any]]] = []
+        heap: list[tuple[float, int, dict[str, Any]]] = []
+        seq = 0
         for row in rows:
+            seq += 1
             memory_id = str(row["memory_id"])
             meta = row["metadata"]
             if user_id and meta.get("user_id") != user_id:
@@ -177,11 +179,12 @@ class LanceVectorStore:
                 "score": float(sim),
                 "source": "vector_local",
             }
+            entry = (float(sim), seq, item)
             if len(heap) < limit:
-                heapq.heappush(heap, (float(sim), item))
+                heapq.heappush(heap, entry)
             else:
-                heapq.heappushpop(heap, (float(sim), item))
-        out = [entry[1] for entry in heap]
+                heapq.heappushpop(heap, entry)
+        out = [entry[2] for entry in heap]
         out.sort(key=lambda x: float(x["score"]), reverse=True)
         return out
 

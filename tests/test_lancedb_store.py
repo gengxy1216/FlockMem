@@ -3,14 +3,14 @@ from __future__ import annotations
 import importlib.util
 import unittest
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from evermemos_lite.testing.writable_tempdir import WritableTempDir
 
 from evermemos_lite.infra.vector.lancedb_store import LanceVectorStore
 
 
 class LanceVectorStorePersistenceTests(unittest.TestCase):
     def test_invalid_index_type_falls_back_to_hnsw_pq(self) -> None:
-        with TemporaryDirectory() as tmp:
+        with WritableTempDir() as tmp:
             base = Path(tmp)
             store = LanceVectorStore(
                 base,
@@ -21,7 +21,7 @@ class LanceVectorStorePersistenceTests(unittest.TestCase):
             self.assertEqual("IVF_HNSW_PQ", store._index_type)
 
     def test_local_upsert_is_persisted_and_restored_after_restart(self) -> None:
-        with TemporaryDirectory() as tmp:
+        with WritableTempDir() as tmp:
             base = Path(tmp)
             store = LanceVectorStore(base, vector_dim=4, use_lancedb=False)
             store.upsert(
@@ -42,7 +42,7 @@ class LanceVectorStorePersistenceTests(unittest.TestCase):
             self.assertGreater(float(hits[0]["score"]), 0.99)
 
     def test_search_filters_by_user_group_and_candidate_ids(self) -> None:
-        with TemporaryDirectory() as tmp:
+        with WritableTempDir() as tmp:
             base = Path(tmp)
             store = LanceVectorStore(base, vector_dim=4, use_lancedb=False)
             store.upsert(
@@ -67,7 +67,7 @@ class LanceVectorStorePersistenceTests(unittest.TestCase):
             self.assertEqual(["mem-1"], [x["memory_id"] for x in hits])
 
     def test_restore_ignores_corrupted_log_lines(self) -> None:
-        with TemporaryDirectory() as tmp:
+        with WritableTempDir() as tmp:
             base = Path(tmp)
             store = LanceVectorStore(base, vector_dim=4, use_lancedb=False)
             store.upsert(
@@ -92,12 +92,37 @@ class LanceVectorStorePersistenceTests(unittest.TestCase):
             self.assertEqual(1, len(hits))
             self.assertEqual("mem-1", hits[0]["memory_id"])
 
+    def test_search_handles_equal_scores_without_type_error(self) -> None:
+        with WritableTempDir() as tmp:
+            base = Path(tmp)
+            store = LanceVectorStore(base, vector_dim=4, use_lancedb=False)
+            store.upsert(
+                "row-1",
+                "mem-1",
+                [1.0, 0.0, 0.0, 0.0],
+                {"user_id": "u1", "group_id": "g1", "importance_score": 0.3},
+            )
+            store.upsert(
+                "row-2",
+                "mem-2",
+                [0.0, 1.0, 0.0, 0.0],
+                {"user_id": "u1", "group_id": "g1", "importance_score": 0.3},
+            )
+            # Query vector intentionally mismatches dimension and yields equal local scores.
+            hits = store.search(
+                vector=[1.0, 0.0],
+                top_k=2,
+                user_id="u1",
+                group_id="g1",
+            )
+            self.assertEqual(2, len(hits))
+
     @unittest.skipUnless(
         importlib.util.find_spec("lancedb") is not None,
         "lancedb package is required for this test",
     )
     def test_high_importance_memory_is_persisted_to_lancedb(self) -> None:
-        with TemporaryDirectory() as tmp:
+        with WritableTempDir() as tmp:
             base = Path(tmp)
             store = LanceVectorStore(
                 base,

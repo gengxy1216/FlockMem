@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from evermemos_lite.testing.writable_tempdir import WritableTempDir
 
 from evermemos_lite.domain.policy import EffectivePolicy
 from evermemos_lite.infra.sqlite.db import SQLiteEngine
-from evermemos_lite.service.memory_service import MemoryService
+from evermemos_lite.service.memory_service import MemoryService, RetrievalSufficiency
 
 
 class _StubVectorStore:
@@ -14,6 +14,7 @@ class _StubVectorStore:
         self.enabled = True
         self.vector_dim = 4
         self.last_top_k: int | None = None
+        self.last_vector_len: int | None = None
         self.search_calls = 0
         self.upsert_calls = 0
         self.hits: list[dict] = [
@@ -36,6 +37,7 @@ class _StubVectorStore:
     ) -> list[dict]:
         self.search_calls += 1
         self.last_top_k = int(top_k)
+        self.last_vector_len = len(vector)
         return list(self.hits)
 
     def upsert(
@@ -49,12 +51,13 @@ class _StubVectorStore:
 
 
 class _StubEmbeddingProvider:
-    def __init__(self) -> None:
+    def __init__(self, vector: list[float] | None = None) -> None:
         self.calls = 0
+        self.vector = list(vector) if vector else [0.9, 0.1, 0.0, 0.0]
 
     def embed(self, text: str) -> list[float]:
         self.calls += 1
-        return [0.9, 0.1, 0.0, 0.0]
+        return list(self.vector)
 
 
 class _FailingEmbeddingProvider:
@@ -77,12 +80,13 @@ class MemoryServiceSemanticLatencyTests(unittest.TestCase):
         *,
         semantic_vector_budget_cap: int = 18,
         semantic_keyword_budget_cap: int = 12,
+        embedding_vector: list[float] | None = None,
     ) -> tuple[MemoryService, _StubVectorStore, _StubEmbeddingProvider]:
-        tmp = TemporaryDirectory(ignore_cleanup_errors=True)
+        tmp = WritableTempDir(ignore_cleanup_errors=True)
         self.addCleanup(tmp.cleanup)
         engine = SQLiteEngine(Path(tmp.name) / "lite.db")
         vector_store = _StubVectorStore()
-        embedding = _StubEmbeddingProvider()
+        embedding = _StubEmbeddingProvider(vector=embedding_vector)
         service = MemoryService(
             engine=engine,
             vector_store=vector_store,
@@ -149,6 +153,31 @@ class MemoryServiceSemanticLatencyTests(unittest.TestCase):
             candidate_episode_ids=None,
         )
         self.assertEqual(18, vector_store.last_top_k)
+
+    def test_basic_search_fits_query_vector_before_probe(self) -> None:
+        service, vector_store, _ = self._build_service(
+            embedding_vector=[0.9, 0.1, 0.0, 0.0, 0.2, 0.3]
+        )
+        policy = EffectivePolicy(
+            vector_enabled=True,
+            keyword_enabled=True,
+            agentic_enabled=False,
+            importance_threshold=0.1,
+            keyword_top_k=50,
+            vector_top_k=50,
+            rrf_k=80,
+            profile="agentic",
+            reason="test",
+        )
+        service._basic_search(
+            policy=policy,
+            query="how to handle semantic workflow regression",
+            user_id="u1",
+            group_id="g1",
+            top_k=5,
+            candidate_episode_ids=None,
+        )
+        self.assertEqual(4, vector_store.last_vector_len)
 
     def test_id_like_confident_keyword_skips_vector_probe(self) -> None:
         service, vector_store, embedding = self._build_service()
@@ -218,10 +247,54 @@ class MemoryServiceSemanticLatencyTests(unittest.TestCase):
         service, _, _ = self._build_service()
         skip = service._should_skip_agentic_second_round(
             query="semantic relation question",
-            hits=[{"score": 0.2, "source": "vector"}],
+            hits=[
+                {"score": 0.66, "source": "hybrid_rrf", "in_keyword_hits": True, "in_vector_hits": True},
+                {"score": 0.52, "source": "hybrid_rrf", "in_keyword_hits": True, "in_vector_hits": False},
+            ],
             top_k=5,
         )
         self.assertTrue(skip)
+
+    def test_agentic_never_skips_when_vector_probe_errors(self) -> None:
+        service, _, _ = self._build_service()
+        skip = service._should_skip_agentic_second_round(
+            query="semantic relation question",
+            hits=[{"score": 0.8, "source": "keyword"}],
+            top_k=5,
+            vector_probe_error=True,
+        )
+        self.assertFalse(skip)
+
+    def test_agentic_does_not_skip_complex_temporal_query_with_weak_hits(self) -> None:
+        service, _, _ = self._build_service()
+        skip = service._should_skip_agentic_second_round(
+            query="请按时间线回顾去年项目进展然后说明风险",
+            hits=[
+                {"score": 0.14, "source": "keyword"},
+                {"score": 0.13, "source": "keyword"},
+            ],
+            top_k=5,
+        )
+        self.assertFalse(skip)
+
+    def test_agentic_heuristic_sufficient_still_runs_second_round_for_precision_query(self) -> None:
+        service, _, _ = self._build_service()
+        sufficiency = RetrievalSufficiency(
+            sufficient=True,
+            source="heuristic",
+            confidence=1.0,
+            reason="heuristic",
+        )
+        skip = service._should_skip_agentic_second_round(
+            query="When did customer alpha submit the escalation ticket?",
+            hits=[
+                {"score": 0.50, "source": "keyword", "in_keyword_hits": True, "in_vector_hits": False},
+                {"score": 0.44, "source": "keyword", "in_keyword_hits": True, "in_vector_hits": False},
+            ],
+            top_k=5,
+            sufficiency=sufficiency,
+        )
+        self.assertFalse(skip)
 
     def test_basic_search_can_defer_foresight_attachment(self) -> None:
         service, _, _ = self._build_service()
@@ -254,7 +327,7 @@ class MemoryServiceSemanticLatencyTests(unittest.TestCase):
         )
         self.assertEqual(0, calls["count"])
 
-    def test_agentic_skips_noop_second_round_without_scene_candidates(self) -> None:
+    def test_agentic_runs_second_round_when_no_scene_and_heuristic_not_confident(self) -> None:
         service, _, _ = self._build_service()
         policy = EffectivePolicy(
             vector_enabled=True,
@@ -277,6 +350,9 @@ class MemoryServiceSemanticLatencyTests(unittest.TestCase):
             top_k,
             candidate_episode_ids,
             attach_foresight=True,
+            as_of_ts=None,
+            start_ts=None,
+            end_ts=None,
         ):
             calls["count"] += 1
             return []
@@ -294,8 +370,8 @@ class MemoryServiceSemanticLatencyTests(unittest.TestCase):
             group_id="g1",
             top_k=5,
         )
-        self.assertEqual([], rows)
-        self.assertEqual(1, calls["count"])
+        self.assertGreaterEqual(calls["count"], 2)
+        self.assertGreaterEqual(len(rows), 1)
 
     def test_semantic_query_prefers_vector_priority_merge(self) -> None:
         service, vector_store, _ = self._build_service()
@@ -315,9 +391,9 @@ class MemoryServiceSemanticLatencyTests(unittest.TestCase):
             {"id": "v2", "memory_id": "m-9", "score": 0.62, "source": "vector"},
         ]
         service.repo.search_keyword = lambda **_: [
-            {"memory_id": "m-2", "score": 3.2, "source": "keyword"},
-            {"memory_id": "m-3", "score": 3.1, "source": "keyword"},
-            {"memory_id": "m-1", "score": 1.2, "source": "keyword"},
+            {"memory_id": "m-2", "score": 0.12, "source": "keyword"},
+            {"memory_id": "m-3", "score": 0.09, "source": "keyword"},
+            {"memory_id": "m-1", "score": 0.08, "source": "keyword"},
         ]
         service.repo.fetch_episodes_by_ids = lambda episode_ids: [
             {
@@ -334,7 +410,7 @@ class MemoryServiceSemanticLatencyTests(unittest.TestCase):
         ]
         rows = service._basic_search(
             policy=policy,
-            query="how to debug semantic workflow under customer alpha",
+            query="debug semantic workflow under customer alpha operations",
             user_id="u1",
             group_id="g1",
             top_k=3,
@@ -344,8 +420,54 @@ class MemoryServiceSemanticLatencyTests(unittest.TestCase):
         self.assertEqual("m-1", str(rows[0].get("id")))
         self.assertEqual("semantic_vector_priority", str(rows[0].get("source")))
 
+    def test_temporal_query_does_not_prefer_vector_priority_merge(self) -> None:
+        service, vector_store, _ = self._build_service()
+        policy = EffectivePolicy(
+            vector_enabled=True,
+            keyword_enabled=True,
+            agentic_enabled=False,
+            importance_threshold=0.1,
+            keyword_top_k=50,
+            vector_top_k=50,
+            rrf_k=80,
+            profile="agentic",
+            reason="test",
+        )
+        vector_store.hits = [
+            {"id": "v1", "memory_id": "m-1", "score": 0.78, "source": "vector"},
+            {"id": "v2", "memory_id": "m-9", "score": 0.64, "source": "vector"},
+        ]
+        service.repo.search_keyword = lambda **_: [
+            {"memory_id": "m-2", "score": 0.12, "source": "keyword"},
+            {"memory_id": "m-3", "score": 0.09, "source": "keyword"},
+            {"memory_id": "m-1", "score": 0.08, "source": "keyword"},
+        ]
+        service.repo.fetch_episodes_by_ids = lambda episode_ids: [
+            {
+                "id": str(mid),
+                "event_id": f"e-{mid}",
+                "timestamp": 1700000000,
+                "summary": f"memory-{mid}",
+                "subject": "user",
+                "episode": f"semantic details {mid}",
+                "importance_score": 0.7,
+                "storage_tier": "vector_only",
+            }
+            for mid in episode_ids
+        ]
+        rows = service._basic_search(
+            policy=policy,
+            query="When did customer alpha escalate the incident?",
+            user_id="u1",
+            group_id="g1",
+            top_k=3,
+            candidate_episode_ids=None,
+        )
+        self.assertGreaterEqual(len(rows), 1)
+        self.assertNotEqual("semantic_vector_priority", str(rows[0].get("source")))
+
     def test_maybe_index_vector_returns_error_when_embedding_fails(self) -> None:
-        tmp = TemporaryDirectory(ignore_cleanup_errors=True)
+        tmp = WritableTempDir(ignore_cleanup_errors=True)
         self.addCleanup(tmp.cleanup)
         engine = SQLiteEngine(Path(tmp.name) / "lite.db")
         vector_store = _StubVectorStore()

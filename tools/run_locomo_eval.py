@@ -5,6 +5,7 @@ import json
 import os
 import random
 import re
+import sqlite3
 import sys
 import tempfile
 import time
@@ -124,6 +125,91 @@ def _rank_of_first_match(hit_event_ids: list[str], expected: set[str]) -> int | 
     return None
 
 
+def _load_ingested_message_event_map(
+    *, db_path: Path, group_id: str
+) -> dict[str, str]:
+    if not db_path.exists():
+        return {}
+    mapping: dict[str, str] = {}
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(str(db_path))
+        cur = conn.execute(
+            """
+            SELECT source_message_id, event_id
+            FROM episodic_memory
+            WHERE is_deleted=0
+              AND COALESCE(group_id, '') = ?
+            ORDER BY timestamp DESC, updated_at DESC
+            """,
+            (str(group_id or ""),),
+        )
+        for src_id, event_id in cur.fetchall():
+            mid = _normalize_message_id(src_id)
+            eid = _as_str(event_id)
+            if not mid or not eid:
+                continue
+            # Keep first seen mapping to stay stable across repeated runs.
+            mapping.setdefault(mid, eid)
+    except Exception:
+        return {}
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    return mapping
+
+
+def _lookup_event_ids_by_source_message_ids(
+    *,
+    db_path: Path,
+    group_id: str,
+    message_ids: list[str],
+) -> dict[str, list[str]]:
+    if not db_path.exists() or not message_ids:
+        return {}
+    conn: sqlite3.Connection | None = None
+    out: dict[str, list[str]] = {}
+    unique_ids = [mid for mid in dict.fromkeys(message_ids) if _as_str(mid)]
+    if not unique_ids:
+        return {}
+    try:
+        conn = sqlite3.connect(str(db_path))
+        placeholders = ",".join("?" for _ in unique_ids)
+        params: list[str] = [str(group_id or "")]
+        params.extend(unique_ids)
+        cur = conn.execute(
+            f"""
+            SELECT source_message_id, event_id
+            FROM episodic_memory
+            WHERE is_deleted=0
+              AND COALESCE(group_id, '') = ?
+              AND source_message_id IN ({placeholders})
+            ORDER BY timestamp DESC, updated_at DESC
+            """,
+            tuple(params),
+        )
+        for src_id, event_id in cur.fetchall():
+            mid = _normalize_message_id(src_id)
+            eid = _as_str(event_id)
+            if not mid or not eid:
+                continue
+            bucket = out.setdefault(mid, [])
+            if eid not in bucket:
+                bucket.append(eid)
+    except Exception:
+        return {}
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    return out
+
+
 @contextmanager
 def _temporary_env(patch: dict[str, str]) -> Any:
     old_values: dict[str, str | None] = {k: os.environ.get(k) for k in patch}
@@ -183,7 +269,11 @@ def _evaluate_case(
     isolate_by_case: bool,
     search_use_user_id: bool,
     ingest_cache: dict[str, dict[str, str]],
+    db_path: Path,
+    reuse_ingested: bool,
+    skip_ingest_missing: bool,
 ) -> dict[str, Any]:
+    case_started = time.perf_counter()
     case_id = _as_str(case.get("case_id")) or f"case-{int(time.time() * 1000)}"
     user_id = _as_str(case.get("user_id")) or default_user_id
     raw_group = _as_str(case.get("group_id")) or "locomo_group"
@@ -196,11 +286,19 @@ def _evaluate_case(
     if not memories:
         return {"case_id": case_id, "status": "skipped", "reason": "empty_memories"}
 
+    if group_id not in ingest_cache:
+        ingest_cache[group_id] = (
+            _load_ingested_message_event_map(db_path=db_path, group_id=group_id)
+            if reuse_ingested
+            else {}
+        )
     msg_to_event: dict[str, str] = dict(ingest_cache.get(group_id, {}))
+    ingest_started = time.perf_counter()
     missing_ids = [
         row["message_id"] for row in memories if row["message_id"] not in msg_to_event
     ]
-    if missing_ids:
+    ingest_skipped_missing = 0
+    if missing_ids and not skip_ingest_missing:
         for row in memories:
             if row["message_id"] in msg_to_event:
                 continue
@@ -226,6 +324,9 @@ def _evaluate_case(
             if event_id:
                 msg_to_event[row["message_id"]] = event_id
         ingest_cache[group_id] = msg_to_event
+    elif missing_ids and skip_ingest_missing:
+        ingest_skipped_missing = len(missing_ids)
+    ingest_ms = (time.perf_counter() - ingest_started) * 1000.0
 
     expected_event_ids = _as_str_list(case.get("expected_event_ids"))
     unresolved_ids: list[str] = []
@@ -236,10 +337,19 @@ def _evaluate_case(
             or case.get("supporting_turn_ids")
         )
         expected_msg_ids = _as_message_id_list(expected_msg_ids)
+        expected_map = _lookup_event_ids_by_source_message_ids(
+            db_path=db_path,
+            group_id=group_id,
+            message_ids=expected_msg_ids,
+        )
         for msg_id in expected_msg_ids:
-            event_id = msg_to_event.get(msg_id)
-            if event_id:
-                expected_event_ids.append(event_id)
+            resolved = list(expected_map.get(msg_id, []))
+            if not resolved:
+                fallback = msg_to_event.get(msg_id)
+                if fallback:
+                    resolved.append(fallback)
+            if resolved:
+                expected_event_ids.extend(resolved)
             else:
                 unresolved_ids.append(msg_id)
 
@@ -259,13 +369,19 @@ def _evaluate_case(
         "decision_mode": decision_mode,
         "top_k": top_k,
     }
+    search_started = time.perf_counter()
     resp = client.get("/api/v1/memories/search", params=params)
+    search_ms = (time.perf_counter() - search_started) * 1000.0
     if resp.status_code != 200:
         return {
             "case_id": case_id,
             "status": "failed",
             "reason": f"search_http_{resp.status_code}",
             "detail": _as_str(resp.text)[:200],
+            "ingest_skipped_missing": ingest_skipped_missing,
+            "ingest_ms": round(float(ingest_ms), 3),
+            "search_ms": round(float(search_ms), 3),
+            "case_ms": round(float((time.perf_counter() - case_started) * 1000.0), 3),
         }
 
     body = resp.json()
@@ -285,6 +401,12 @@ def _evaluate_case(
         "rank": rank,
         "hit": hit,
         "mrr_contrib": round(1.0 / rank, 8) if rank else 0.0,
+        "ingest_memory_total": len(memories),
+        "ingest_memory_new": len(missing_ids),
+        "ingest_skipped_missing": ingest_skipped_missing,
+        "ingest_ms": round(float(ingest_ms), 3),
+        "search_ms": round(float(search_ms), 3),
+        "case_ms": round(float((time.perf_counter() - case_started) * 1000.0), 3),
     }
 
 
@@ -302,6 +424,8 @@ def run_eval(
     ingest_profile: str,
     graph_enabled: bool,
     data_dir: Path | None,
+    reuse_ingested: bool,
+    skip_ingest_missing: bool,
 ) -> dict[str, Any]:
     raw_rows = _load_jsonl(dataset)
     rows = _sample_cases(raw_rows, sample_size=sample_size, sample_seed=sample_seed)
@@ -339,6 +463,7 @@ def run_eval(
     try:
         with _temporary_env(env_patch):
             app = create_app(LiteSettings.from_env())
+            db_path = Path(base_data_dir / "lite.db")
             with TestClient(app) as client:
                 for row in rows:
                     detail = _evaluate_case(
@@ -351,6 +476,9 @@ def run_eval(
                         isolate_by_case=isolate_by_case,
                         search_use_user_id=search_use_user_id,
                         ingest_cache=ingest_cache,
+                        db_path=db_path,
+                        reuse_ingested=reuse_ingested,
+                        skip_ingest_missing=skip_ingest_missing,
                     )
                     case_details.append(detail)
     finally:
@@ -368,6 +496,12 @@ def run_eval(
     recall_hits = sum(1 for x in evaluated if bool(x.get("hit")))
     mrr_sum = sum(float(x.get("mrr_contrib", 0.0)) for x in evaluated)
     n = len(evaluated)
+    ingest_ms_sum = sum(float(x.get("ingest_ms", 0.0)) for x in evaluated)
+    search_ms_sum = sum(float(x.get("search_ms", 0.0)) for x in evaluated)
+    case_ms_sum = sum(float(x.get("case_ms", 0.0)) for x in evaluated)
+    ingested_total = sum(int(x.get("ingest_memory_total", 0)) for x in evaluated)
+    ingested_new = sum(int(x.get("ingest_memory_new", 0)) for x in evaluated)
+    ingested_skipped = sum(int(x.get("ingest_skipped_missing", 0)) for x in evaluated)
 
     return {
         "status": "ok",
@@ -383,7 +517,16 @@ def run_eval(
         "graph_enabled": graph_enabled,
         "isolate_by_case": isolate_by_case,
         "search_use_user_id": search_use_user_id,
+        "reuse_ingested": reuse_ingested,
+        "skip_ingest_missing": skip_ingest_missing,
         "ingested_groups": len(ingest_cache),
+        "ingested_memory_total": ingested_total,
+        "ingested_memory_new": ingested_new,
+        "ingested_missing_skipped": ingested_skipped,
+        "ms_ingest_total": round(ingest_ms_sum, 3),
+        "ms_search_total": round(search_ms_sum, 3),
+        "ms_case_total": round(case_ms_sum, 3),
+        "ms_case_avg": round(case_ms_sum / n, 3) if n else 0.0,
         "total_cases": len(case_details),
         "evaluated_cases": n,
         "skipped_cases": len(skipped),
@@ -454,6 +597,16 @@ def main() -> None:
         default="",
         help="Optional path to save full JSON report.",
     )
+    parser.add_argument(
+        "--no-reuse-ingested",
+        action="store_true",
+        help="Disable reuse of already ingested message_id->event_id mappings from existing lite.db.",
+    )
+    parser.add_argument(
+        "--skip-ingest-missing",
+        action="store_true",
+        help="Do not ingest missing message_ids; search only over already persisted memories.",
+    )
     args = parser.parse_args()
 
     dataset = Path(args.dataset).resolve()
@@ -473,6 +626,8 @@ def main() -> None:
         ingest_profile=args.ingest_profile,
         graph_enabled=bool(args.graph_enabled),
         data_dir=Path(args.data_dir).resolve() if args.data_dir else None,
+        reuse_ingested=not bool(args.no_reuse_ingested),
+        skip_ingest_missing=bool(args.skip_ingest_missing),
     )
 
     if args.report_out:

@@ -47,50 +47,113 @@ GET /health
 POST /api/v1/memories
 ```
 
+`Content-Type` 必须是 `application/json`，若携带 `charset` 参数则必须为 `utf-8`（否则返回 `415`）。
+
 **Request Body:**
 ```json
 {
-  "content": "User's message or memory content",
-  "metadata": {
-    "type": "conversation",
-    "conversation_id": "conv_123"
-  }
+  "message_id": "msg-001",
+  "create_time": 1735603201,
+  "sender": "zhangsan",
+  "content": "用户消息内容",
+  "group_id": "default:zhangsan",
+  "group_name": "默认分组",
+  "sender_name": "张三",
+  "role": "user"
 }
 ```
+
+**Required fields:**
+- `message_id`
+- `create_time` (Unix 秒级时间戳或 ISO8601 字符串)
+- `sender`
+- `content`
 
 **Response:**
 ```json
 {
-  "id": "mem_abc123",
-  "content": "User's message or memory content",
-  "created_at": "2024-01-01T12:00:00Z"
+  "status": "ok",
+  "message": "memory written",
+  "result": {
+    "success": true,
+    "message_id": "msg-001",
+    "sender": "zhangsan",
+    "group_id": "default:zhangsan",
+    "event_id": "d5f1a8...",
+    "write_time": 1735603201,
+    "summary": "摘要",
+    "importance_score": 0.78,
+    "memory": {
+      "id": "c4ac1f...",
+      "episode": "用户消息内容",
+      "summary": "摘要"
+    }
+  },
+  "request_id": "a8b3..."
 }
 ```
 
 #### Search Memories
 
 ```
-GET /api/v1/memories/search?query=your+search+query&limit=10
+GET /api/v1/memories/search?query=your+search+query&top_k=10
 ```
 
 **Query Parameters:**
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `query` | string | required | Search query |
-| `limit` | int | 10 | Max results |
-| `profile` | string | "agentic" | Retrieval profile (`keyword` / `hybrid` / `agentic`) |
+| `user_id` | string | - | User scope |
+| `group_id` | string | - | Group scope, empty means all groups |
+| `retrieve_method` | string | `keyword` | `keyword` / `vector` / `hybrid` / `rrf` / `agentic` |
+| `decision_mode` | string | `static` | `static` / `rule` / `agent` |
+| `top_k` | int | `20` | Max results (1-100) |
 
 **Response:**
 ```json
 {
-  "results": [
-    {
-      "id": "mem_abc123",
-      "content": "Memory content",
-      "score": 0.95,
-      "metadata": {}
-    }
-  ]
+  "status": "ok",
+  "result": {
+    "memories": [
+      {
+        "id": "c4ac1f...",
+        "event_id": "d5f1a8...",
+        "group_id": "default:zhangsan",
+        "content": "原始记忆内容（统一字段）",
+        "episode": "原始记忆内容",
+        "summary": "摘要",
+        "score": 0.95,
+        "source": "keyword"
+      }
+    ],
+    "effective_policy": {},
+    "conflicts": [],
+    "profile": null
+  }
+}
+```
+
+#### List Memory Groups
+
+```
+GET /api/v1/memories/groups?user_id=zhangsan&limit=100
+```
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "result": {
+    "groups": [
+      {
+        "group_id": "default:zhangsan",
+        "memory_count": 42,
+        "last_timestamp": 1735603300
+      }
+    ],
+    "total_count": 1,
+    "has_more": false
+  }
 }
 ```
 
@@ -275,5 +338,6 @@ All endpoints may return error responses:
 Common status codes:
 - `200` - Success
 - `400` - Bad Request
+- `415` - Unsupported Media Type / Charset
 - `401` - Unauthorized
 - `500` - Internal Server Error

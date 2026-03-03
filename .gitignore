@@ -22,5 +22,6 @@ tmp_paper.txt
 
 dist/
 tools/perf/results/
+tmp_test_runtime/
 
 

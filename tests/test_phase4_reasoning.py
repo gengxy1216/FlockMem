@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 import unittest
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from evermemos_lite.testing.writable_tempdir import WritableTempDir
 
 from evermemos_lite.domain.policy import EffectivePolicy
 from evermemos_lite.infra.sqlite.db import SQLiteEngine
@@ -56,7 +56,7 @@ class _StubExpandingRewriter:
 
 class PhaseFourReasoningTests(unittest.TestCase):
     def _build_service(self, *, query_rewriter=None) -> MemoryService:
-        tmp = TemporaryDirectory(ignore_cleanup_errors=True)
+        tmp = WritableTempDir(ignore_cleanup_errors=True)
         self.addCleanup(tmp.cleanup)
         engine = SQLiteEngine(Path(tmp.name) / "lite.db")
         init_schema(engine)
@@ -138,6 +138,17 @@ class PhaseFourReasoningTests(unittest.TestCase):
         )
         self.assertGreaterEqual(len(calls), 2)
         self.assertGreaterEqual(len(rows), 1)
+
+    def test_temporal_query_variants_include_timeline_hint(self) -> None:
+        service = self._build_service()
+        queries = service._build_agentic_query_variants(
+            original_query="请回顾2024年项目关键事件以及后续进展",
+            rewritten_query="请回顾2024年项目关键事件以及后续进展",
+            first_round_hits=[{"id": "m1", "summary": "项目纪要"}],
+            insufficiency_reason="missing_timeline",
+        )
+        self.assertGreaterEqual(len(queries), 2)
+        self.assertTrue(any("时间线" in q or "顺序" in q for q in queries))
 
     def test_query_expansion_applies_for_non_multi_hop(self) -> None:
         rewriter = _StubExpandingRewriter(

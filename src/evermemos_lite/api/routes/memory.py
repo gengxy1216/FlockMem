@@ -8,7 +8,7 @@ from typing import Any, Literal
 
 import anyio
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
 from evermemos_lite.config.profiles import PROFILE_PRESETS
 from evermemos_lite.domain.policy import RuntimePolicy
@@ -20,6 +20,57 @@ RetrieveMethod = Literal["keyword", "vector", "hybrid", "rrf", "agentic"]
 DecisionMode = Literal["static", "rule", "agent"]
 
 router = APIRouter(prefix="/api/v1/memories", tags=["memories"])
+
+_REPLACEMENT_CHAR = "\ufffd"
+
+
+def _is_utf8_json_content_type(content_type: str | None) -> bool:
+    raw = str(content_type or "").strip()
+    if not raw:
+        return True
+    parts = [part.strip() for part in raw.split(";") if part.strip()]
+    media_type = parts[0].lower() if parts else ""
+    if media_type != "application/json":
+        return False
+    charset: str | None = None
+    for part in parts[1:]:
+        key, _, value = part.partition("=")
+        if key.strip().lower() == "charset":
+            charset = value.strip().strip('"').lower()
+            break
+    if charset is None:
+        return True
+    return charset in {"utf-8", "utf8"}
+
+
+def _validate_text_integrity(value: str, field_name: str) -> str:
+    normalized = str(value or "").strip()
+    if not normalized:
+        raise ValueError(f"{field_name} must not be blank")
+    if _REPLACEMENT_CHAR in normalized:
+        raise ValueError(
+            f"{field_name} contains invalid UTF-8 replacement characters"
+        )
+    if len(normalized) >= 4 and normalized.count("?") >= max(3, len(normalized) // 2):
+        raise ValueError(
+            f"{field_name} appears garbled; please send UTF-8 JSON payload"
+        )
+    return normalized
+
+
+def _normalize_memory_row(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row or {})
+    content = item.get("content")
+    if content is None or str(content) == "":
+        content = item.get("episode")
+    if content is None or str(content) == "":
+        content = item.get("summary")
+    item["content"] = str(content or "")
+    sender = item.get("sender")
+    if sender is None or str(sender).strip() == "":
+        sender = item.get("user_id")
+    item["sender"] = str(sender or "")
+    return item
 
 
 class MemorizeRequest(BaseModel):
@@ -34,29 +85,29 @@ class MemorizeRequest(BaseModel):
 
     @field_validator("message_id", "sender")
     @classmethod
-    def _validate_required_ids(cls, value: str) -> str:
-        v = value.strip()
-        if not v:
-            raise ValueError("must not be empty")
+    def _validate_required_ids(cls, value: str, info: ValidationInfo) -> str:
+        field_name = str(info.field_name or "field")
+        v = _validate_text_integrity(value, field_name)
         if len(v) > 128:
             raise ValueError("too long")
         return v
 
     @field_validator("group_id", "group_name", "sender_name", "role")
     @classmethod
-    def _normalize_optional_text(cls, value: str | None) -> str | None:
+    def _normalize_optional_text(
+        cls, value: str | None, info: ValidationInfo
+    ) -> str | None:
         if value is None:
             return None
-        v = value.strip()
-        return v or None
+        if not str(value).strip():
+            return None
+        field_name = str(info.field_name or "field")
+        return _validate_text_integrity(value, field_name)
 
     @field_validator("content")
     @classmethod
     def _validate_content(cls, value: str) -> str:
-        v = value.strip()
-        if not v:
-            raise ValueError("content must not be blank")
-        return v
+        return _validate_text_integrity(value, "content")
 
 
 class SearchRequest(BaseModel):
@@ -154,6 +205,11 @@ def _validate_time_filters(
 
 @router.post("")
 async def memorize(payload: MemorizeRequest, request: Request) -> dict[str, Any]:
+    if not _is_utf8_json_content_type(request.headers.get("content-type")):
+        raise HTTPException(
+            status_code=415,
+            detail="unsupported content-type or charset, use application/json; charset=utf-8",
+        )
     settings = request.app.state.settings
     resolver = request.app.state.policy_resolver
     memory_service = request.app.state.memory_service
@@ -281,6 +337,7 @@ async def fetch_memories(
             end_ts=end_ts,
         )
     )
+    normalized = [_normalize_memory_row(row) for row in episodes]
     conflicts = await anyio.to_thread.run_sync(
         partial(
             memory_service.repo.list_recent_conflicts,
@@ -296,11 +353,34 @@ async def fetch_memories(
         "status": "ok",
         "message": f"Memory retrieval successful, retrieved {len(episodes)} memories",
         "result": {
-            "memories": episodes,
-            "total_count": len(episodes),
+            "memories": normalized,
+            "total_count": len(normalized),
             "has_more": False,
             "conflicts": conflicts,
             "profile": profile,
+        },
+    }
+
+
+@router.get("/groups")
+async def list_memory_groups(
+    request: Request,
+    user_id: str | None = None,
+    limit: int = 100,
+) -> dict[str, Any]:
+    if limit < 1 or limit > 500:
+        raise HTTPException(status_code=400, detail="limit out of range")
+    memory_service = request.app.state.memory_service
+    groups = await anyio.to_thread.run_sync(
+        partial(memory_service.repo.list_groups, user_id=user_id, limit=limit)
+    )
+    return {
+        "status": "ok",
+        "message": f"Memory groups listed, retrieved {len(groups)} groups",
+        "result": {
+            "groups": groups,
+            "total_count": len(groups),
+            "has_more": False,
         },
     }
 
@@ -374,6 +454,7 @@ async def search_memories(
             end_ts=end_ts,
         )
     )
+    normalized_hits = [_normalize_memory_row(row) for row in hits]
     conflicts = await anyio.to_thread.run_sync(
         partial(
             memory_service.repo.list_recent_conflicts,
@@ -387,9 +468,9 @@ async def search_memories(
     )
     return {
         "status": "ok",
-        "message": f"Memory search successful, retrieved {len(hits)} groups",
+        "message": f"Memory search successful, retrieved {len(normalized_hits)} memories",
         "result": {
-            "memories": hits,
+            "memories": normalized_hits,
             "effective_policy": effective.to_dict(),
             "decision_mode": decision_mode,
             "runtime_profile": runtime_profile,
