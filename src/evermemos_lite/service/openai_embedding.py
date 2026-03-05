@@ -28,10 +28,7 @@ class OpenAIEmbeddingProvider:
         req = request.Request(
             url=self._build_embeddings_url(base_url),
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-            },
+            headers=self._build_headers(api_key),
             method="POST",
         )
         try:
@@ -63,3 +60,18 @@ class OpenAIEmbeddingProvider:
         if base.endswith("/v1"):
             return f"{base}/embeddings"
         return f"{base}/embeddings"
+
+    def _build_headers(self, api_key: str) -> dict[str, str]:
+        token = api_key.strip()
+        headers = {"Content-Type": "application/json"}
+        lower = token.lower()
+        if lower.startswith("authorization:"):
+            auth_value = token.split(":", 1)[1].strip()
+            if auth_value:
+                headers["Authorization"] = auth_value
+            return headers
+        if lower.startswith(("bearer ", "basic ", "token ", "apikey ")):
+            headers["Authorization"] = token
+            return headers
+        headers["Authorization"] = f"Bearer {token}"
+        return headers

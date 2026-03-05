@@ -19,7 +19,7 @@ Prerequisites:
 ### Option A: Install from npm (recommended for distribution)
 
 ```bash
-openclaw plugins install openclaw-plugin-minimem
+openclaw plugins install @gengxy1216/minimem-memory
 openclaw plugins enable minimem-memory
 ```
 
@@ -68,21 +68,72 @@ Default installation keeps config minimal and practical:
 - auto inject on start: on
 - auto capture on end: on
 - auto compression capture: on
+- compression mode: `truncate` (fast/fail-open default)
+- inherit OpenClaw primary model to MiniMem `config.json`: on
 
 This means most users can start without editing config.
 
-## Publish to npm
+## OpenClaw Primary Model Sync
+
+Install scripts now do an install-time sync:
+
+1. detect OpenClaw primary model from `~/.openclaw/openclaw.json`
+2. write snapshot to plugin config:
+   - `inheritPrimaryModel`
+   - `primaryModelSnapshot`
+   - `primaryModelSyncStatus`
+3. sync model trio into MiniMem `config.json` (chat/extractor follows the same model source)
+
+Priority rule:
+
+- explicit MiniMem `config.json` override > OpenClaw primary snapshot > default
+
+Manual override protection:
+
+- If MiniMem model fields were manually changed after previous sync, next sync is skipped (`skipped_manual_override`).
+- Use force sync when you intentionally want OpenClaw primary to overwrite manual values.
+
+Examples:
+
+```powershell
+# force sync OpenClaw primary model into MiniMem config.json
+powershell -ExecutionPolicy Bypass -File integrations/openclaw-plugin/install.ps1 -ForcePrimarySync
+```
+
+```bash
+# disable primary-model inheritance
+bash integrations/openclaw-plugin/install.sh --disable-primary-sync
+```
+
+```bash
+# sync to an explicit MiniMem config.json path
+bash integrations/openclaw-plugin/install.sh --minimem-config /path/to/config.json
+```
+
+## Publish to GitHub Packages (npm registry)
 
 ```bash
 cd integrations/openclaw-plugin
 npm run pack:check
-npm publish
+npm run publish:github
 ```
 
-If login is required:
+One-click publish:
+
+```powershell
+$env:NODE_AUTH_TOKEN="<github_pat_with_write_packages>"
+powershell -ExecutionPolicy Bypass -File integrations/openclaw-plugin/publish-github-package.ps1
+```
 
 ```bash
-npm adduser
+export NODE_AUTH_TOKEN="<github_pat_with_write_packages>"
+bash integrations/openclaw-plugin/publish-github-package.sh
+```
+
+If login is required (manual):
+
+```bash
+npm login --scope=@gengxy1216 --registry=https://npm.pkg.github.com --auth-type=legacy
 ```
 
 ## Group Strategy (Keep Per-Role Support)
@@ -129,6 +180,69 @@ This gives you:
 - no-config startup for new users
 - strict controllability for production bots
 
+## Compression Governance (Task04)
+
+`agent_end` context compression now supports explicit strategy and budget controls:
+
+- `compressionMode`: `truncate | llm_summary | hybrid`
+- `compressionTimeoutMs`: timeout budget for LLM compression path
+- `compressionMinTurns`: skip compression capture when turn count is too small
+- `compressionLlmBaseUrl` / `compressionLlmApiKey` / `compressionLlmModel`: optional OpenAI-compatible summary model
+
+Behavior guarantees:
+
+- default is `truncate` (lowest latency)
+- `llm_summary` and `hybrid` both fail-open to `truncate` on timeout/error
+- fallback reason and compression diagnostics are written to memory metadata and debug logs
+
+## Agent/Channel Routing (Task03)
+
+Plugin config now supports:
+
+- `senderMap`: `agent_id -> sender`
+- `channelGroupMap`: `channel -> group_id`
+- `sharePolicy`: ACL per `group_id`
+  - `readableAgents`
+  - `writableAgents`
+
+Resolution order:
+
+1. explicit `group_id` from tool call
+2. `channelGroupMap[channel]`
+3. fallback from `groupStrategy`
+
+ACL behavior:
+
+- If `sharePolicy[group_id]` denies current `agent_id`, plugin falls back to default group (`groupStrategy`) instead of hard failing.
+- This keeps runtime fail-open while reducing cross-group leakage risk.
+
+Metadata automatically written into memory content:
+
+- `agent_id`
+- `channel`
+- `task_id`
+- `trace_id`
+- `route_acl_fallback` (when ACL fallback happened)
+
+Install script behavior:
+
+- tries to auto-extract `senderMap` from OpenClaw `agents`
+- tries to auto-extract `channelGroupMap` from OpenClaw `channels`
+- reads optional root `sharePolicy` from OpenClaw config
+
+You can always edit these mappings manually in `~/.openclaw/openclaw.json`.
+
+## OpenClaw Backtest Checklist
+
+Recommended after each major plugin change:
+
+1. run one installation sync (`install.ps1` or `install.sh`)
+2. run two agents in one shared group and verify cross-recall works
+3. run two agents in isolated groups and verify no cross-recall
+4. set `sharePolicy` deny rule and verify ACL fallback to default group
+5. verify `before_agent_start` still injects context and `agent_end` still writes memory
+6. record P50/P95 for startup injection and compare to previous baseline
+
 ## Tools
 
 - `minimem_memory_write`
@@ -148,6 +262,12 @@ You can configure without touching `openclaw.json`:
 - `MINIMEM_SHARED_GROUP_ID`
 - `MINIMEM_AUTO_CAPTURE_ON_END`
 - `MINIMEM_AUTO_INJECT_ON_START`
+- `MINIMEM_COMPRESSION_MODE`
+- `MINIMEM_COMPRESSION_TIMEOUT_MS`
+- `MINIMEM_COMPRESSION_MIN_TURNS`
+- `MINIMEM_COMPRESSION_LLM_BASE_URL`
+- `MINIMEM_COMPRESSION_LLM_API_KEY`
+- `MINIMEM_COMPRESSION_LLM_MODEL`
 
 ## UTF-8 / Windows
 

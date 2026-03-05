@@ -24,12 +24,17 @@ def _default_data_dir() -> Path:
     return Path.home() / ".local" / "share" / "minimem"
 
 
+def _default_config_dir() -> Path:
+    return Path.home() / ".minimem"
+
+
 @dataclass(frozen=True)
 class LiteSettings:
     app_name: str
     host: str
     port: int
     data_dir: Path
+    config_path: Path
     db_path: Path
     lancedb_dir: Path
     graph_dir: Path
@@ -46,10 +51,27 @@ class LiteSettings:
     embedding_api_key: str
     embedding_provider: str
     embedding_model: str
+    local_embedding_model: str
+    local_embedding_device: str
+    local_embedding_batch_size: int
+    local_embedding_max_concurrency: int
     extractor_provider: str
     extractor_base_url: str
     extractor_api_key: str
     extractor_model: str
+    rerank_provider: str
+    rerank_base_url: str
+    rerank_api_key: str
+    rerank_model: str
+    rerank_trigger_k: int
+    rerank_top_n: int
+    rerank_timeout_ms: int
+    local_rerank_model: str
+    local_rerank_device: str
+    local_rerank_batch_size: int
+    local_rerank_max_concurrency: int
+    skill_adapter_enabled: bool
+    skill_adapter_whitelist: str
     phase1_enabled: bool
     phase1_semantic_boundary_enabled: bool
     phase1_narrative_enabled: bool
@@ -97,6 +119,17 @@ class LiteSettings:
         if not data_dir_raw:
             data_dir_raw = str(_default_data_dir())
         data_dir = Path(data_dir_raw).resolve()
+        config_path_raw = str(os.getenv("LITE_CONFIG_PATH", "")).strip()
+        if config_path_raw:
+            config_path = Path(config_path_raw).resolve()
+        else:
+            config_dir_raw = str(os.getenv("LITE_CONFIG_DIR", "")).strip()
+            config_dir = (
+                Path(config_dir_raw).resolve()
+                if config_dir_raw
+                else _default_config_dir().resolve()
+            )
+            config_path = (config_dir / "config.json").resolve()
         db_path = Path(os.getenv("LITE_DB_PATH", str(data_dir / "lite.db"))).resolve()
         lancedb_dir = Path(
             os.getenv("LITE_LANCEDB_DIR", str(data_dir / "lancedb"))
@@ -107,6 +140,7 @@ class LiteSettings:
             host=os.getenv("LITE_HOST", "127.0.0.1"),
             port=int(os.getenv("LITE_PORT", "20195")),
             data_dir=data_dir,
+            config_path=config_path,
             db_path=db_path,
             lancedb_dir=lancedb_dir,
             graph_dir=graph_dir,
@@ -143,6 +177,18 @@ class LiteSettings:
             embedding_model=os.getenv(
                 "LITE_EMBEDDING_MODEL", "BAAI/bge-large-zh-v1.5"
             ),
+            local_embedding_model=os.getenv(
+                "LITE_LOCAL_EMBEDDING_MODEL", "local-hash-384"
+            ),
+            local_embedding_device=os.getenv(
+                "LITE_LOCAL_EMBEDDING_DEVICE", "cpu"
+            ),
+            local_embedding_batch_size=max(
+                1, int(os.getenv("LITE_LOCAL_EMBEDDING_BATCH_SIZE", "16"))
+            ),
+            local_embedding_max_concurrency=max(
+                1, int(os.getenv("LITE_LOCAL_EMBEDDING_MAX_CONCURRENCY", "2"))
+            ),
             extractor_provider=os.getenv("LITE_EXTRACTOR_PROVIDER", "chat_model"),
             extractor_base_url=os.getenv(
                 "LITE_EXTRACTOR_BASE_URL",
@@ -155,6 +201,45 @@ class LiteSettings:
             extractor_model=os.getenv(
                 "LITE_EXTRACTOR_MODEL", "Qwen/Qwen3-235B-A22B-Instruct-2507"
             ),
+            rerank_provider=os.getenv("LITE_RERANK_PROVIDER", "chat_model"),
+            rerank_base_url=os.getenv(
+                "LITE_RERANK_BASE_URL",
+                os.getenv("LITE_CHAT_BASE_URL", "https://api.siliconflow.cn/v1"),
+            ),
+            rerank_api_key=os.getenv(
+                "LITE_RERANK_API_KEY",
+                os.getenv("LITE_CHAT_API_KEY", ""),
+            ),
+            rerank_model=os.getenv(
+                "LITE_RERANK_MODEL",
+                os.getenv("LITE_CHAT_MODEL", "Qwen/Qwen3-8B"),
+            ),
+            rerank_trigger_k=max(
+                2, int(os.getenv("LITE_RERANK_TRIGGER_K", "20"))
+            ),
+            rerank_top_n=max(
+                1, int(os.getenv("LITE_RERANK_TOP_N", "20"))
+            ),
+            rerank_timeout_ms=max(
+                60, int(os.getenv("LITE_RERANK_TIMEOUT_MS", "220"))
+            ),
+            local_rerank_model=os.getenv(
+                "LITE_LOCAL_RERANK_MODEL", "local-rerank-lexical-v1"
+            ),
+            local_rerank_device=os.getenv(
+                "LITE_LOCAL_RERANK_DEVICE", "cpu"
+            ),
+            local_rerank_batch_size=max(
+                1, int(os.getenv("LITE_LOCAL_RERANK_BATCH_SIZE", "16"))
+            ),
+            local_rerank_max_concurrency=max(
+                1, int(os.getenv("LITE_LOCAL_RERANK_MAX_CONCURRENCY", "2"))
+            ),
+            skill_adapter_enabled=_env_bool("LITE_SKILL_ADAPTER_ENABLED", True),
+            skill_adapter_whitelist=str(
+                os.getenv("LITE_SKILL_ADAPTER_WHITELIST", "markitdown,pdf,pptx")
+            ).strip()
+            or "markitdown,pdf,pptx",
             phase1_enabled=_env_bool("LITE_PHASE1_ENABLED", True),
             phase1_semantic_boundary_enabled=_env_bool(
                 "LITE_PHASE1_SEMANTIC_BOUNDARY_ENABLED", True

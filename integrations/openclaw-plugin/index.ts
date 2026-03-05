@@ -1,7 +1,23 @@
+import { appendFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 type RetrieveMethod = "keyword" | "vector" | "hybrid" | "rrf" | "agentic";
 type DecisionMode = "static" | "rule" | "agent";
 type MemoryType = "dialogue" | "bot_profile" | "context_compression" | "note";
 type GroupStrategy = "shared" | "per_role" | "per_user";
+type CompressionMode = "truncate" | "llm_summary" | "hybrid";
+
+type PrimaryModelSnapshot = {
+  provider: string;
+  baseUrl: string;
+  model: string;
+};
+
+type SharePolicy = {
+  readableAgents: string[];
+  writableAgents: string[];
+};
 
 type PluginConfig = {
   baseUrl: string;
@@ -12,6 +28,7 @@ type PluginConfig = {
   defaultUserId: string;
   defaultGroupId: string;
   defaultSender: string;
+  defaultAgentId: string;
   defaultTopK: number;
   defaultRetrieveMethod: RetrieveMethod;
   defaultDecisionMode: DecisionMode;
@@ -23,6 +40,18 @@ type PluginConfig = {
   bootstrapTopK: number;
   autoCaptureOnEnd: boolean;
   autoCaptureCompression: boolean;
+  inheritPrimaryModel: boolean;
+  primaryModelSnapshot: PrimaryModelSnapshot;
+  primaryModelSyncStatus: string;
+  senderMap: Record<string, string>;
+  channelGroupMap: Record<string, string>;
+  sharePolicy: Record<string, SharePolicy>;
+  compressionMode: CompressionMode;
+  compressionTimeoutMs: number;
+  compressionMinTurns: number;
+  compressionLlmBaseUrl: string;
+  compressionLlmApiKey: string;
+  compressionLlmModel: string;
   compressionMaxChars: number;
   debug: boolean;
 };
@@ -36,6 +65,7 @@ const RETRIEVE_METHODS = new Set<RetrieveMethod>([
 ]);
 const DECISION_MODES = new Set<DecisionMode>(["static", "rule", "agent"]);
 const GROUP_STRATEGIES = new Set<GroupStrategy>(["shared", "per_role", "per_user"]);
+const COMPRESSION_MODES = new Set<CompressionMode>(["truncate", "llm_summary", "hybrid"]);
 const MEMORY_TYPES = new Set<MemoryType>([
   "dialogue",
   "bot_profile",
@@ -131,6 +161,10 @@ function normalizeToolInput(value: unknown): Record<string, unknown> {
     "sender",
     "group_id",
     "user_id",
+    "agent_id",
+    "channel",
+    "task_id",
+    "trace_id",
     "memory_type",
     "top_k",
     "message_id",
@@ -166,6 +200,15 @@ function extractExecuteInput(args: unknown[]): Record<string, unknown> {
       }
       if (!hints.group_id) {
         hints.group_id = item.group_id || item.groupId;
+      }
+      if (!hints.channel) {
+        hints.channel = item.channel || item.channel_id || item.channelId;
+      }
+      if (!hints.task_id) {
+        hints.task_id = item.task_id || item.taskId || item.run_id || item.runId;
+      }
+      if (!hints.trace_id) {
+        hints.trace_id = item.trace_id || item.traceId || item.request_id || item.requestId;
       }
     }
   }
@@ -222,8 +265,70 @@ function envNumber(keys: string[], fallback: number): number {
   return fallback;
 }
 
+function normalizeStringMap(raw: unknown): Record<string, string> {
+  if (!isObject(raw)) {
+    return {};
+  }
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    const k = toStr(key);
+    const v = toStr(value);
+    if (!k || !v) {
+      continue;
+    }
+    out[k] = v;
+  }
+  return out;
+}
+
+function normalizeAgentList(raw: unknown): string[] {
+  if (Array.isArray(raw)) {
+    return Array.from(
+      new Set(
+        raw.map((item) => toStr(item)).filter(Boolean)
+      )
+    );
+  }
+  const text = toStr(raw);
+  if (!text) {
+    return [];
+  }
+  return Array.from(
+    new Set(
+      text
+        .split(/[,\s]+/)
+        .map((item) => item.trim())
+        .filter(Boolean)
+    )
+  );
+}
+
+function normalizeSharePolicy(raw: unknown): Record<string, SharePolicy> {
+  if (!isObject(raw)) {
+    return {};
+  }
+  const out: Record<string, SharePolicy> = {};
+  for (const [group, policyRaw] of Object.entries(raw)) {
+    const groupId = toStr(group);
+    if (!groupId || !isObject(policyRaw)) {
+      continue;
+    }
+    const readableAgents = normalizeAgentList(
+      policyRaw.readableAgents ?? policyRaw.readable_agents ?? policyRaw.readers
+    );
+    const writableAgents = normalizeAgentList(
+      policyRaw.writableAgents ?? policyRaw.writable_agents ?? policyRaw.writers
+    );
+    out[groupId] = { readableAgents, writableAgents };
+  }
+  return out;
+}
+
 function normalizeConfig(api: any): PluginConfig {
   const raw = (api && typeof api.pluginConfig === "object" && api.pluginConfig) || {};
+  const primaryModelSnapshotRaw = isObject(raw.primaryModelSnapshot)
+    ? (raw.primaryModelSnapshot as Record<string, unknown>)
+    : {};
   const defaultTopK = Number.isFinite(raw.defaultTopK)
     ? Number(raw.defaultTopK)
     : envNumber(["MINIMEM_DEFAULT_TOP_K"], 8);
@@ -236,6 +341,15 @@ function normalizeConfig(api: any): PluginConfig {
   const compressionMaxChars = Number.isFinite(raw.compressionMaxChars)
     ? Number(raw.compressionMaxChars)
     : envNumber(["MINIMEM_COMPRESSION_MAX_CHARS"], 2500);
+  const compressionTimeoutMs = Number.isFinite(raw.compressionTimeoutMs)
+    ? Number(raw.compressionTimeoutMs)
+    : envNumber(["MINIMEM_COMPRESSION_TIMEOUT_MS"], 280);
+  const compressionMinTurns = Number.isFinite(raw.compressionMinTurns)
+    ? Number(raw.compressionMinTurns)
+    : envNumber(["MINIMEM_COMPRESSION_MIN_TURNS"], 2);
+  const compressionModeRaw = (
+    toStr(raw.compressionMode) || envString("MINIMEM_COMPRESSION_MODE") || "truncate"
+  ) as CompressionMode;
   const retrieveMethod = (
     toStr(raw.defaultRetrieveMethod) || envString("MINIMEM_DEFAULT_RETRIEVE_METHOD")
   ) as RetrieveMethod;
@@ -258,6 +372,8 @@ function normalizeConfig(api: any): PluginConfig {
     defaultGroupId: toStr(raw.defaultGroupId) || envString("MINIMEM_GROUP_ID"),
     defaultSender:
       toStr(raw.defaultSender) || envString("MINIMEM_DEFAULT_SENDER") || "openclaw-bot",
+    defaultAgentId:
+      toStr(raw.defaultAgentId) || envString("MINIMEM_DEFAULT_AGENT_ID") || "main",
     defaultTopK: Math.max(1, Math.min(100, defaultTopK)),
     defaultRetrieveMethod: RETRIEVE_METHODS.has(retrieveMethod) ? retrieveMethod : "agentic",
     defaultDecisionMode: DECISION_MODES.has(decisionMode) ? decisionMode : "rule",
@@ -282,6 +398,33 @@ function normalizeConfig(api: any): PluginConfig {
       raw.autoCaptureCompression !== undefined
         ? Boolean(raw.autoCaptureCompression)
         : envBool(["MINIMEM_AUTO_CAPTURE_COMPRESSION"], true),
+    inheritPrimaryModel:
+      raw.inheritPrimaryModel !== undefined
+        ? Boolean(raw.inheritPrimaryModel)
+        : envBool(["MINIMEM_INHERIT_PRIMARY_MODEL"], true),
+    primaryModelSnapshot: {
+      provider: toStr(primaryModelSnapshotRaw.provider),
+      baseUrl: toStr(primaryModelSnapshotRaw.baseUrl),
+      model: toStr(primaryModelSnapshotRaw.model),
+    },
+    primaryModelSyncStatus: toStr(raw.primaryModelSyncStatus) || "not_synced",
+    senderMap: normalizeStringMap(raw.senderMap),
+    channelGroupMap: normalizeStringMap(raw.channelGroupMap),
+    sharePolicy: normalizeSharePolicy(raw.sharePolicy),
+    compressionMode: COMPRESSION_MODES.has(compressionModeRaw) ? compressionModeRaw : "truncate",
+    compressionTimeoutMs: Math.max(120, Math.min(5000, compressionTimeoutMs)),
+    compressionMinTurns: Math.max(1, Math.min(24, Math.floor(compressionMinTurns))),
+    compressionLlmBaseUrl:
+      toStr(raw.compressionLlmBaseUrl)
+      || envString("MINIMEM_COMPRESSION_LLM_BASE_URL")
+      || toStr(primaryModelSnapshotRaw.baseUrl),
+    compressionLlmApiKey:
+      toStr(raw.compressionLlmApiKey)
+      || envString("MINIMEM_COMPRESSION_LLM_API_KEY"),
+    compressionLlmModel:
+      toStr(raw.compressionLlmModel)
+      || envString("MINIMEM_COMPRESSION_LLM_MODEL")
+      || toStr(primaryModelSnapshotRaw.model),
     compressionMaxChars: Math.max(200, Math.min(12000, compressionMaxChars)),
     debug: raw.debug !== undefined ? Boolean(raw.debug) : envBool(["MINIMEM_DEBUG"], false),
   };
@@ -301,12 +444,25 @@ function parseSessionRole(sessionKey: unknown): string {
 
 function inferAgentId(event: any): string {
   const candidates = [
+    event?.agent,
     event?.agentId,
     event?.agent_id,
+    event?.agent?.agentId,
+    event?.agent?.agent_id,
     event?.agent?.id,
     event?.run?.agentId,
+    event?.run?.agent_id,
+    event?.run?.agent?.id,
     event?.session?.agentId,
+    event?.session?.agent_id,
+    event?.session?.agent?.id,
     parseSessionRole(event?.sessionKey),
+    parseSessionRole(event?.session_key),
+    parseSessionRole(event?.run?.sessionKey),
+    parseSessionRole(event?.run?.session_key),
+    parseSessionRole(event?.session?.key),
+    parseSessionRole(event?.session?.sessionKey),
+    parseSessionRole(event?.session?.session_key),
   ];
   for (const item of candidates) {
     const value = toStr(item);
@@ -317,6 +473,94 @@ function inferAgentId(event: any): string {
   return "";
 }
 
+function inferChannel(event: any): string {
+  const candidates = [
+    event?.channel,
+    event?.channel_id,
+    event?.channelId,
+    event?.run?.channel,
+    event?.run?.channel_id,
+    event?.run?.channelId,
+    event?.session?.channel,
+    event?.session?.channel_id,
+    event?.session?.channelId,
+  ];
+  for (const item of candidates) {
+    const value = toStr(item);
+    if (value) {
+      return value;
+    }
+  }
+  return "";
+}
+
+function inferTaskId(event: any): string {
+  const candidates = [
+    event?.taskId,
+    event?.task_id,
+    event?.runId,
+    event?.run_id,
+    event?.run?.id,
+    event?.run?.taskId,
+    event?.run?.task_id,
+    event?.id,
+  ];
+  for (const item of candidates) {
+    const value = toStr(item);
+    if (value) {
+      return value;
+    }
+  }
+  return "";
+}
+
+function inferTraceId(event: any): string {
+  const candidates = [
+    event?.traceId,
+    event?.trace_id,
+    event?.requestId,
+    event?.request_id,
+    event?.run?.traceId,
+    event?.run?.trace_id,
+    event?.run?.requestId,
+    event?.run?.request_id,
+  ];
+  for (const item of candidates) {
+    const value = toStr(item);
+    if (value) {
+      return value;
+    }
+  }
+  return "";
+}
+
+function defaultGroupIdByStrategy(cfg: PluginConfig, sender: string, userId: string): string {
+  if (cfg.groupStrategy === "shared") {
+    return cfg.sharedGroupId || "shared:openclaw";
+  }
+  if (cfg.groupStrategy === "per_user") {
+    return `default:${userId}`;
+  }
+  return `default:${sender}`;
+}
+
+function groupAccessAllowed(
+  cfg: PluginConfig,
+  groupId: string,
+  agentId: string,
+  operation: "read" | "write"
+): boolean {
+  const policy = cfg.sharePolicy[groupId];
+  if (!policy || !agentId) {
+    return true;
+  }
+  const allowList = operation === "write" ? policy.writableAgents : policy.readableAgents;
+  if (!allowList.length) {
+    return true;
+  }
+  return allowList.includes(agentId);
+}
+
 function resolveScope(
   cfg: PluginConfig,
   input: {
@@ -325,27 +569,36 @@ function resolveScope(
     sender?: unknown;
     agent_id?: unknown;
     session_key?: unknown;
+    channel?: unknown;
+    operation?: "read" | "write";
   }
-): { userId: string; groupId: string; sender: string } {
-  const derivedAgentId = toStr(input.agent_id) || parseSessionRole(input.session_key);
+) : {
+  userId: string;
+  groupId: string;
+  sender: string;
+  agentId: string;
+  channel: string;
+  aclFallback: boolean;
+} {
+  const derivedAgentId = toStr(input.agent_id) || parseSessionRole(input.session_key) || cfg.defaultAgentId;
+  const mappedSender = derivedAgentId ? toStr(cfg.senderMap[derivedAgentId]) : "";
   const sender = toStr(input.sender)
-    || (cfg.autoSenderFromAgent ? derivedAgentId : "")
+    || (cfg.autoSenderFromAgent ? mappedSender || derivedAgentId : "")
     || cfg.defaultSender
     || cfg.defaultUserId
     || "openclaw-bot";
   const userId = toStr(input.user_id) || cfg.defaultUserId || sender;
+  const channel = toStr(input.channel);
+  const mappedGroup = channel ? toStr(cfg.channelGroupMap[channel]) : "";
   const explicitGroup = toStr(input.group_id) || cfg.defaultGroupId;
-  let groupId = explicitGroup;
-  if (!groupId) {
-    if (cfg.groupStrategy === "shared") {
-      groupId = cfg.sharedGroupId || "shared:openclaw";
-    } else if (cfg.groupStrategy === "per_user") {
-      groupId = `default:${userId}`;
-    } else {
-      groupId = `default:${sender}`;
-    }
+  let groupId = explicitGroup || mappedGroup || defaultGroupIdByStrategy(cfg, sender, userId);
+  const operation = input.operation || "read";
+  let aclFallback = false;
+  if (!groupAccessAllowed(cfg, groupId, derivedAgentId, operation)) {
+    groupId = defaultGroupIdByStrategy(cfg, sender, userId);
+    aclFallback = true;
   }
-  return { userId, groupId, sender };
+  return { userId, groupId, sender, agentId: derivedAgentId, channel, aclFallback };
 }
 
 function memoryPrefix(memoryType: MemoryType): string {
@@ -380,6 +633,53 @@ function buildWriteContent(input: {
     }
   }
   return { memoryType, content: lines.join("\n") };
+}
+
+function buildRoutingMetadata(
+  input: Record<string, unknown>,
+  scope: {
+    agentId: string;
+    channel: string;
+    aclFallback: boolean;
+  }
+): Record<string, unknown> {
+  const base = isObject(input.metadata) ? { ...(input.metadata as Record<string, unknown>) } : {};
+  const agentId = toStr(input.agent_id) || scope.agentId;
+  const channel = toStr(input.channel) || scope.channel;
+  const taskId = toStr(input.task_id);
+  const traceId = toStr(input.trace_id);
+  if (agentId) {
+    base.agent_id = agentId;
+  }
+  if (channel) {
+    base.channel = channel;
+  }
+  if (taskId) {
+    base.task_id = taskId;
+  }
+  if (traceId) {
+    base.trace_id = traceId;
+  }
+  if (scope.aclFallback) {
+    base.route_acl_fallback = true;
+  }
+  return base;
+}
+
+function debugLog(cfg: PluginConfig, label: string, payload: Record<string, unknown>): void {
+  if (!cfg.debug) {
+    return;
+  }
+  try {
+    const line = JSON.stringify({
+      ts: new Date().toISOString(),
+      label,
+      payload,
+    });
+    appendFileSync(join(tmpdir(), "minimem-openclaw-debug.jsonl"), `${line}\n`, "utf8");
+  } catch (_error) {
+    // no-op: debug logging must never break the main path
+  }
 }
 
 function extractMessageText(content: unknown): string {
@@ -436,27 +736,192 @@ function extractLastTurn(messages: unknown): { user: string; assistant: string }
   return { user: userText, assistant: assistantText };
 }
 
-function compressMessages(messages: unknown, maxChars: number): string {
+type CompressionResult = {
+  content: string;
+  modeRequested: CompressionMode;
+  modeUsed: string;
+  turnCount: number;
+  sourceChars: number;
+  latencyMs: number;
+  fallbackReason: string;
+};
+
+function collectCompressionSource(
+  messages: unknown,
+  maxMessages: number = 12,
+): { source: string; sourceChars: number; turnCount: number } {
   if (!Array.isArray(messages) || messages.length === 0) {
-    return "";
+    return { source: "", sourceChars: 0, turnCount: 0 };
   }
   const lines: string[] = [];
-  for (const message of messages.slice(-10)) {
+  let turnCount = 0;
+  for (const message of messages.slice(-maxMessages)) {
     if (!message || typeof message !== "object") {
       continue;
     }
     const obj = message as Record<string, unknown>;
-    const role = toStr(obj.role) || "unknown";
+    const role = toStr(obj.role).toLowerCase() || "unknown";
     const text = extractMessageText(obj.content);
     if (!text) {
       continue;
     }
+    if (role === "user" || role === "assistant") {
+      turnCount += 1;
+    }
     lines.push(`${role}: ${text}`);
   }
-  if (!lines.length) {
+  const source = lines.join("\n");
+  return { source, sourceChars: source.length, turnCount };
+}
+
+function buildChatCompletionsUrl(baseUrl: string): string {
+  const base = toStr(baseUrl).replace(/\/+$/, "");
+  if (!base) {
     return "";
   }
-  return clipText(lines.join("\n"), maxChars);
+  if (base.endsWith("/chat/completions")) {
+    return base;
+  }
+  if (base.endsWith("/v1")) {
+    return `${base}/chat/completions`;
+  }
+  return `${base}/chat/completions`;
+}
+
+async function summarizeWithLlm(cfg: PluginConfig, source: string): Promise<string> {
+  const baseUrl = buildChatCompletionsUrl(cfg.compressionLlmBaseUrl);
+  const apiKey = toStr(cfg.compressionLlmApiKey);
+  const model = toStr(cfg.compressionLlmModel);
+  if (!baseUrl || !apiKey || !model) {
+    throw new Error("compression_llm_not_configured");
+  }
+  const prompt = clipText(source, 6000);
+  const payload = {
+    model,
+    temperature: 0.2,
+    messages: [
+      {
+        role: "system",
+        content:
+          "Summarize dialogue for memory retrieval. Keep key facts, decisions, constraints and next actions. Output plain text only.",
+      },
+      {
+        role: "user",
+        content: `Compress this dialogue into <= ${cfg.compressionMaxChars} chars:\n${prompt}`,
+      },
+    ],
+  };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), cfg.compressionTimeoutMs);
+  try {
+    const response = await fetch(baseUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    const raw = await response.text();
+    if (!response.ok) {
+      throw new Error(`compression_llm_http_${response.status}:${clipText(raw, 220)}`);
+    }
+    let body: any = {};
+    try {
+      body = JSON.parse(raw);
+    } catch (_error) {
+      throw new Error("compression_llm_invalid_json");
+    }
+    const content = body?.choices?.[0]?.message?.content;
+    let text = "";
+    if (typeof content === "string") {
+      text = content.trim();
+    } else if (Array.isArray(content)) {
+      text = content
+        .map((item) => (isObject(item) ? toStr(item.text) : ""))
+        .join("")
+        .trim();
+    } else {
+      text = toStr(content);
+    }
+    if (!text) {
+      throw new Error("compression_llm_empty");
+    }
+    return clipText(text, cfg.compressionMaxChars);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function compressMessagesForCapture(
+  cfg: PluginConfig,
+  messages: unknown,
+): Promise<CompressionResult> {
+  const startedAt = Date.now();
+  const mode = cfg.compressionMode;
+  const source = collectCompressionSource(messages);
+  const truncateOutput = clipText(source.source, cfg.compressionMaxChars);
+  const resultBase: Omit<CompressionResult, "content" | "modeUsed" | "fallbackReason" | "latencyMs"> = {
+    modeRequested: mode,
+    turnCount: source.turnCount,
+    sourceChars: source.sourceChars,
+  };
+  if (!source.source) {
+    return {
+      ...resultBase,
+      content: "",
+      modeUsed: "skip.empty_source",
+      fallbackReason: "",
+      latencyMs: Date.now() - startedAt,
+    };
+  }
+  if (source.turnCount < cfg.compressionMinTurns) {
+    return {
+      ...resultBase,
+      content: "",
+      modeUsed: "skip.min_turns",
+      fallbackReason: "",
+      latencyMs: Date.now() - startedAt,
+    };
+  }
+  if (mode === "truncate") {
+    return {
+      ...resultBase,
+      content: truncateOutput,
+      modeUsed: "truncate",
+      fallbackReason: "",
+      latencyMs: Date.now() - startedAt,
+    };
+  }
+  const shouldTryLlm = mode === "llm_summary" || (mode === "hybrid" && source.sourceChars > cfg.compressionMaxChars);
+  if (!shouldTryLlm) {
+    return {
+      ...resultBase,
+      content: truncateOutput,
+      modeUsed: "hybrid.truncate_short_input",
+      fallbackReason: "",
+      latencyMs: Date.now() - startedAt,
+    };
+  }
+  try {
+    const llmText = await summarizeWithLlm(cfg, source.source);
+    return {
+      ...resultBase,
+      content: llmText,
+      modeUsed: "llm_summary",
+      fallbackReason: "",
+      latencyMs: Date.now() - startedAt,
+    };
+  } catch (error) {
+    return {
+      ...resultBase,
+      content: truncateOutput,
+      modeUsed: `${mode}.fallback_truncate`,
+      fallbackReason: clipText(String(error || "compression_failed"), 180),
+      latencyMs: Date.now() - startedAt,
+    };
+  }
 }
 
 function selectBootstrapQuery(cfg: PluginConfig, event: any): string {
@@ -574,11 +1039,19 @@ async function requestJson(
 }
 
 export default function minimemOpenclawPlugin(api: any) {
-  const cfg = normalizeConfig(api);
+  const currentConfig = (): PluginConfig => normalizeConfig(api);
 
   async function writeMemory(input: Record<string, unknown>): Promise<any> {
-    const prepared = buildWriteContent(input);
-    const scope = resolveScope(cfg, input);
+    const cfg = currentConfig();
+    const scope = resolveScope(cfg, {
+      ...input,
+      operation: "write",
+    });
+    const metadata = buildRoutingMetadata(input, scope);
+    const prepared = buildWriteContent({
+      ...input,
+      metadata,
+    });
     const senderName = toStr(input.sender_name) || scope.sender;
     const role = toStr(input.role) || "user";
     const messageId = toStr(input.message_id) || `openclaw-${Date.now().toString(36)}`;
@@ -600,11 +1073,15 @@ export default function minimemOpenclawPlugin(api: any) {
   }
 
   async function retrieveMemory(input: Record<string, unknown>): Promise<any> {
+    const cfg = currentConfig();
     const query = toStr(input.query);
     if (!query) {
       throw new Error("query is required");
     }
-    const scope = resolveScope(cfg, input);
+    const scope = resolveScope(cfg, {
+      ...input,
+      operation: "read",
+    });
     const topKRaw = Number(input.top_k);
     const topK = Number.isFinite(topKRaw) ? Math.floor(topKRaw) : cfg.defaultTopK;
     const retrieveMethod = (toStr(input.retrieve_method) || cfg.defaultRetrieveMethod) as RetrieveMethod;
@@ -634,6 +1111,14 @@ export default function minimemOpenclawPlugin(api: any) {
       count: rows.length,
       memories: rows,
       context_for_agent: contextForAgent,
+      scope: {
+        user_id: scope.userId,
+        group_id: scope.groupId,
+        sender: scope.sender,
+        agent_id: scope.agentId,
+        channel: scope.channel,
+        acl_fallback: scope.aclFallback,
+      },
       raw: response,
     };
   }
@@ -657,6 +1142,10 @@ export default function minimemOpenclawPlugin(api: any) {
         role: { type: "string", default: "user" },
         user_id: { type: "string" },
         group_id: { type: "string" },
+        agent_id: { type: "string" },
+        channel: { type: "string" },
+        task_id: { type: "string" },
+        trace_id: { type: "string" },
         message_id: { type: "string" },
         create_time: { type: "integer" },
         metadata: { type: "object", additionalProperties: true },
@@ -696,24 +1185,53 @@ export default function minimemOpenclawPlugin(api: any) {
         runtime_profile: { type: "string" },
         user_id: { type: "string" },
         group_id: { type: "string" },
+        agent_id: { type: "string" },
+        channel: { type: "string" },
+        task_id: { type: "string" },
+        trace_id: { type: "string" },
       },
     },
     execute: async (...runtimeArgs: unknown[]) =>
       retrieveMemory(extractExecuteInput(runtimeArgs)),
   });
 
-  if (typeof api.on === "function" && cfg.autoInjectOnStart) {
+  if (typeof api.on === "function") {
     api.on("before_agent_start", async (event: any) => {
       try {
+        const cfg = currentConfig();
+        if (!cfg.autoInjectOnStart) {
+          return;
+        }
         const agentId = inferAgentId(event);
+        const channel = inferChannel(event);
+        const taskId = inferTaskId(event);
+        const traceId = inferTraceId(event);
         const scope = resolveScope(cfg, {
           agent_id: agentId,
           session_key: event?.sessionKey,
+          channel,
+          operation: "read",
+        });
+        debugLog(cfg, "before_agent_start.scope", {
+          inferred: { agentId, channel, taskId, traceId },
+          event: {
+            sessionKey: toStr(event?.sessionKey),
+            session_key: toStr(event?.session_key),
+            agentId: toStr(event?.agentId),
+            agent_id: toStr(event?.agent_id),
+            eventAgent: toStr(event?.agent),
+            runAgentId: toStr(event?.run?.agentId),
+            runAgent_id: toStr(event?.run?.agent_id),
+            sessionAgentId: toStr(event?.session?.agentId),
+            sessionAgent_id: toStr(event?.session?.agent_id),
+          },
+          scope,
         });
         const query = selectBootstrapQuery(cfg, event);
         if (!query) {
           return;
         }
+        const injectStartMs = Date.now();
         const recalled = await retrieveMemory({
           query,
           top_k: cfg.bootstrapTopK,
@@ -721,6 +1239,18 @@ export default function minimemOpenclawPlugin(api: any) {
           decision_mode: cfg.defaultDecisionMode,
           user_id: scope.userId,
           group_id: scope.groupId,
+          agent_id: scope.agentId,
+          channel,
+          task_id: taskId,
+          trace_id: traceId,
+        });
+        const injectLatencyMs = Date.now() - injectStartMs;
+        debugLog(cfg, "before_agent_start.inject_latency", {
+          latency_ms: injectLatencyMs,
+          memory_count: Number(recalled?.count ?? 0),
+          context_chars: toStr(recalled?.context_for_agent).length,
+          query_chars: query.length,
+          scope,
         });
         const context = toStr(recalled?.context_for_agent);
         if (!context) {
@@ -735,13 +1265,37 @@ export default function minimemOpenclawPlugin(api: any) {
     });
   }
 
-  if (typeof api.on === "function" && cfg.autoCaptureOnEnd) {
+  if (typeof api.on === "function") {
     api.on("agent_end", async (event: any) => {
       try {
+        const cfg = currentConfig();
+        if (!cfg.autoCaptureOnEnd) {
+          return;
+        }
         const agentId = inferAgentId(event);
+        const channel = inferChannel(event);
+        const taskId = inferTaskId(event);
+        const traceId = inferTraceId(event);
         const scope = resolveScope(cfg, {
           agent_id: agentId,
           session_key: event?.sessionKey,
+          channel,
+          operation: "write",
+        });
+        debugLog(cfg, "agent_end.scope", {
+          inferred: { agentId, channel, taskId, traceId },
+          event: {
+            sessionKey: toStr(event?.sessionKey),
+            session_key: toStr(event?.session_key),
+            agentId: toStr(event?.agentId),
+            agent_id: toStr(event?.agent_id),
+            eventAgent: toStr(event?.agent),
+            runAgentId: toStr(event?.run?.agentId),
+            runAgent_id: toStr(event?.run?.agent_id),
+            sessionAgentId: toStr(event?.session?.agentId),
+            sessionAgent_id: toStr(event?.session?.agent_id),
+          },
+          scope,
         });
         const turn = extractLastTurn(event?.messages);
         const sessionKey = toStr(event?.sessionKey);
@@ -760,26 +1314,55 @@ export default function minimemOpenclawPlugin(api: any) {
             role: "assistant",
             user_id: scope.userId,
             group_id: scope.groupId,
+            agent_id: scope.agentId,
+            channel,
+            task_id: taskId,
+            trace_id: traceId,
             metadata: {
               session_key: sessionKey || undefined,
-              agent_id: agentId || undefined,
+              agent_id: scope.agentId || undefined,
+              channel: channel || undefined,
+              task_id: taskId || undefined,
+              trace_id: traceId || undefined,
             },
           });
         }
         if (cfg.autoCaptureCompression) {
-          const compressed = compressMessages(event?.messages, cfg.compressionMaxChars);
-          if (compressed) {
+          const compression = await compressMessagesForCapture(cfg, event?.messages);
+          debugLog(cfg, "agent_end.compression", {
+            mode_requested: compression.modeRequested,
+            mode_used: compression.modeUsed,
+            turn_count: compression.turnCount,
+            source_chars: compression.sourceChars,
+            output_chars: compression.content.length,
+            latency_ms: compression.latencyMs,
+            fallback_reason: compression.fallbackReason || undefined,
+          });
+          if (compression.content) {
             await writeMemory({
               memory_type: "context_compression",
-              content: compressed,
+              content: compression.content,
               sender: scope.sender,
               sender_name: scope.sender,
               role: "assistant",
               user_id: scope.userId,
               group_id: scope.groupId,
+              agent_id: scope.agentId,
+              channel,
+              task_id: taskId,
+              trace_id: traceId,
               metadata: {
                 session_key: sessionKey || undefined,
-                agent_id: agentId || undefined,
+                agent_id: scope.agentId || undefined,
+                channel: channel || undefined,
+                task_id: taskId || undefined,
+                trace_id: traceId || undefined,
+                compression_mode_requested: compression.modeRequested,
+                compression_mode_used: compression.modeUsed,
+                compression_turn_count: compression.turnCount,
+                compression_source_chars: compression.sourceChars,
+                compression_latency_ms: compression.latencyMs,
+                compression_fallback_reason: compression.fallbackReason || undefined,
               },
             });
           }
@@ -794,6 +1377,6 @@ export default function minimemOpenclawPlugin(api: any) {
 
   return {
     name: "MiniMem Memory Bridge",
-    version: "0.1.0",
+    version: "0.1.1",
   };
 }

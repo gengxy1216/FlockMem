@@ -1,5 +1,5 @@
 {
-  "name": "openclaw-plugin-minimem",
+  "name": "@gengxy1216/minimem-memory",
   "version": "0.1.1",
   "type": "module",
   "main": "index.ts",
@@ -28,9 +28,12 @@
   ],
   "scripts": {
     "pack:check": "npm pack --dry-run",
-    "pack": "npm pack"
+    "pack": "npm pack",
+    "publish:github": "npm publish --registry https://npm.pkg.github.com --access public",
+    "release:github": "npm run pack:check && npm run publish:github"
   },
   "publishConfig": {
+    "registry": "https://npm.pkg.github.com",
     "access": "public"
   },
   "files": [

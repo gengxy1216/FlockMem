@@ -1,7 +1,7 @@
 {
   "id": "minimem-memory",
   "name": "MiniMem Memory Bridge",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Lightweight OpenClaw plugin for MiniMem memory write/retrieve and cross-session context recall.",
   "author": "MiniMem",
   "kind": "memory",
@@ -50,6 +50,11 @@
         "type": "string",
         "default": "openclaw-bot",
         "description": "Default sender used when writing memory"
+      },
+      "defaultAgentId": {
+        "type": "string",
+        "default": "main",
+        "description": "Fallback agent id when hook event omits agent/session identity"
       },
       "defaultTopK": {
         "type": "integer",
@@ -108,11 +113,118 @@
         "default": true,
         "description": "Persist compact context summary at agent end"
       },
+      "inheritPrimaryModel": {
+        "type": "boolean",
+        "default": true,
+        "description": "Whether OpenClaw primary model should be synced into MiniMem config.json"
+      },
+      "primaryModelSnapshot": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "provider": {
+            "type": "string",
+            "default": ""
+          },
+          "baseUrl": {
+            "type": "string",
+            "default": ""
+          },
+          "model": {
+            "type": "string",
+            "default": ""
+          }
+        },
+        "default": {
+          "provider": "",
+          "baseUrl": "",
+          "model": ""
+        },
+        "description": "Last OpenClaw primary model snapshot collected during install/sync"
+      },
+      "primaryModelSyncStatus": {
+        "type": "string",
+        "default": "not_synced",
+        "description": "Latest install-time primary-model sync status"
+      },
+      "senderMap": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "string"
+        },
+        "default": {},
+        "description": "Map OpenClaw agent_id -> MiniMem sender"
+      },
+      "channelGroupMap": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "string"
+        },
+        "default": {},
+        "description": "Map OpenClaw channel -> MiniMem group_id"
+      },
+      "sharePolicy": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "readableAgents": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            },
+            "writableAgents": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": []
+            }
+          }
+        },
+        "default": {},
+        "description": "Optional ACL for each group_id. Empty list means unrestricted."
+      },
       "compressionMaxChars": {
         "type": "integer",
         "minimum": 200,
         "maximum": 12000,
         "default": 2500
+      },
+      "compressionMode": {
+        "type": "string",
+        "enum": ["truncate", "llm_summary", "hybrid"],
+        "default": "truncate",
+        "description": "Compression strategy for agent_end context capture"
+      },
+      "compressionTimeoutMs": {
+        "type": "integer",
+        "minimum": 120,
+        "maximum": 5000,
+        "default": 280,
+        "description": "Timeout budget for llm_summary/hybrid compression path"
+      },
+      "compressionMinTurns": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 24,
+        "default": 2,
+        "description": "Skip compression capture when available user/assistant turns are below this value"
+      },
+      "compressionLlmBaseUrl": {
+        "type": "string",
+        "description": "Optional OpenAI-compatible chat completion base URL for compression model"
+      },
+      "compressionLlmApiKey": {
+        "type": "string",
+        "description": "Optional API key for compression LLM"
+      },
+      "compressionLlmModel": {
+        "type": "string",
+        "description": "Optional model id for compression LLM"
       },
       "debug": {
         "type": "boolean",

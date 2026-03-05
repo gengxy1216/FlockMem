@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "skills": {
+    "minimem-mcp-integration": {
+      "source": "gengxy1216/MiniMem",
+      "sourceType": "github",
+      "computedHash": "589f720b080f11e3a129ffb2d1dde8ca3ef627b4ee6b05ab23bfa334df76534e"
+    }
+  }
+}

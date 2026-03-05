@@ -15,18 +15,24 @@ class SettingsPathTests(unittest.TestCase):
             "LITE_EMBEDDING_API_KEY": "k",
         }
         if os.name == "nt":
+            env["USERPROFILE"] = r"C:\Users\tester"
             env["LOCALAPPDATA"] = r"C:\Users\tester\AppData\Local"
             expected_data_dir = Path(r"C:\Users\tester\AppData\Local\MiniMem").resolve()
+            expected_config_path = Path(r"C:\Users\tester\.minimem\config.json").resolve()
         else:
+            env["HOME"] = "/home/tester"
             env["XDG_DATA_HOME"] = "/home/tester/.local/share"
             expected_data_dir = Path("/home/tester/.local/share/minimem").resolve()
+            expected_config_path = Path("/home/tester/.minimem/config.json").resolve()
 
         with patch.dict(os.environ, env, clear=True):
             settings = LiteSettings.from_env()
         self.assertEqual(expected_data_dir, settings.data_dir)
+        self.assertEqual(expected_config_path, settings.config_path)
         self.assertEqual((expected_data_dir / "lancedb").resolve(), settings.lancedb_dir)
         self.assertEqual((expected_data_dir / "kuzu").resolve(), settings.graph_dir)
         self.assertEqual((expected_data_dir / "lite.db").resolve(), settings.db_path)
+        self.assertEqual(settings.chat_base_url, settings.rerank_base_url)
 
     def test_lite_data_dir_env_overrides_default(self) -> None:
         env = {
@@ -34,12 +40,31 @@ class SettingsPathTests(unittest.TestCase):
             "LITE_CHAT_API_KEY": "k",
             "LITE_EMBEDDING_API_KEY": "k",
         }
+        if os.name == "nt":
+            env["USERPROFILE"] = r"C:\Users\tester"
+            expected_config_path = Path(r"C:\Users\tester\.minimem\config.json").resolve()
+        else:
+            env["HOME"] = "/home/tester"
+            expected_config_path = Path("/home/tester/.minimem/config.json").resolve()
         with patch.dict(os.environ, env, clear=True):
             settings = LiteSettings.from_env()
         expected_data_dir = Path(env["LITE_DATA_DIR"]).resolve()
         self.assertEqual(expected_data_dir, settings.data_dir)
+        self.assertEqual(expected_config_path, settings.config_path)
         self.assertEqual((expected_data_dir / "lancedb").resolve(), settings.lancedb_dir)
         self.assertEqual((expected_data_dir / "kuzu").resolve(), settings.graph_dir)
+
+    def test_lite_config_dir_env_overrides_default(self) -> None:
+        env = {
+            "LITE_DATA_DIR": r"C:\mem-data" if os.name == "nt" else "/tmp/mem-data",
+            "LITE_CHAT_API_KEY": "k",
+            "LITE_EMBEDDING_API_KEY": "k",
+            "LITE_CONFIG_DIR": r"C:\cfg\MiniMem" if os.name == "nt" else "/tmp/minimem-cfg",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            settings = LiteSettings.from_env()
+        expected_config_path = Path(env["LITE_CONFIG_DIR"]).resolve() / "config.json"
+        self.assertEqual(expected_config_path.resolve(), settings.config_path)
 
     def test_search_trace_env_is_parsed(self) -> None:
         env = {
@@ -49,8 +74,10 @@ class SettingsPathTests(unittest.TestCase):
             "LITE_SEARCH_TRACE_SLOW_MS": "150",
         }
         if os.name == "nt":
+            env["USERPROFILE"] = r"C:\Users\tester"
             env["LOCALAPPDATA"] = r"C:\Users\tester\AppData\Local"
         else:
+            env["HOME"] = "/home/tester"
             env["XDG_DATA_HOME"] = "/home/tester/.local/share"
         with patch.dict(os.environ, env, clear=True):
             settings = LiteSettings.from_env()

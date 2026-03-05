@@ -99,6 +99,9 @@ class _StubMiniMemHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/v1/memories":
             self._send_json({"ok": True, "saved": body})
             return
+        if parsed.path == "/api/v1/ingest/skill":
+            self._send_json({"ok": True, "ingested": body, "accepted": True})
+            return
         if parsed.path == "/api/v1/chat/simple":
             self._send_json(
                 {"ok": True, "answer": "stub-answer", "citations": [{"id": "slice-5"}]}
@@ -178,6 +181,7 @@ class MiniMemMCPServerTests(unittest.TestCase):
                 "search_memories",
                 "chat_with_memory",
                 "write_memory",
+                "ingest_skill_output",
                 "graph_search",
                 "graph_neighbors",
             }.issubset(names)
@@ -226,6 +230,33 @@ class MiniMemMCPServerTests(unittest.TestCase):
         saved = payload.get("saved", {})
         self.assertTrue(str(saved.get("message_id", "")).startswith("mcp-"))
         self.assertEqual("group-mcp-test", saved.get("group_id"))
+
+    def test_ingest_skill_output_uses_normalized_contract(self) -> None:
+        async def _run() -> dict[str, Any]:
+            async with Client(self._client_config()) as client:
+                result = await client.call_tool(
+                    "ingest_skill_output",
+                    {
+                        "source_type": "pdf",
+                        "source_uri": "file:///tmp/a.pdf",
+                        "summary": "pdf summary",
+                        "chunks": ["chunk-a", "chunk-b"],
+                        "skill_name": "pdf",
+                        "agent_id": "agent-a",
+                        "task_id": "task-1",
+                        "channel": "chan-a",
+                    },
+                )
+                return _tool_payload(result)
+
+        payload = asyncio.run(_run())
+        ingested = payload.get("ingested", {})
+        self.assertEqual("pdf", ingested.get("source_type"))
+        self.assertEqual("pdf", ingested.get("skill_name"))
+        self.assertEqual("agent-a", ingested.get("agent_id"))
+        self.assertEqual("task-1", ingested.get("task_id"))
+        self.assertEqual("chan-a", ingested.get("channel"))
+        self.assertEqual("group-mcp-test", ingested.get("group_id"))
 
 
 if __name__ == "__main__":

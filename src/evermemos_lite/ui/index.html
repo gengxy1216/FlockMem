@@ -507,6 +507,16 @@
     .config-status{
       min-height:20px;
     }
+    .cfg-mode-btn.active{
+      background:#eef3f8;
+      border-color:#dde4ec;
+      color:#0f172a;
+    }
+    #cfg_raw_json{
+      min-height:320px;
+      max-height:560px;
+      font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    }
     .graph-explorer{
       display:grid;
       grid-template-columns:minmax(290px,380px) 1fr;
@@ -1256,7 +1266,12 @@
                     <option value="zh-CN">中文</option>
                   </select>
                 </div>
-                <section class="config-panel">
+                <div class="row">
+                  <button id="btn_cfg_mode_form" class="cfg-mode-btn active" type="button">表单模式</button>
+                  <button id="btn_cfg_mode_raw" class="cfg-mode-btn" type="button">RAW 模式</button>
+                  <span class="tiny muted">RAW 会直接编辑 config.json；保存后模型配置热生效，其他设置可能需要重启。</span>
+                </div>
+                <section class="config-panel cfg-form-only">
                   <h4>Chat Provider</h4>
                   <div class="config-grid">
                     <div><label class="label" for="cfg_chat_provider">provider</label><select id="cfg_chat_provider"></select></div>
@@ -1265,7 +1280,7 @@
                     <div><label class="label" for="cfg_chat_model">model</label><input id="cfg_chat_model" placeholder="Qwen/Qwen3-8B" /></div>
                   </div>
                 </section>
-                <section class="config-panel">
+                <section class="config-panel cfg-form-only">
                   <h4>Embedding Provider</h4>
                   <div class="config-grid">
                     <div>
@@ -1280,7 +1295,7 @@
                     <div><label class="label" for="cfg_embed_model">model</label><input id="cfg_embed_model" placeholder="text-embedding-3-small" /></div>
                   </div>
                 </section>
-                <section class="config-panel">
+                <section class="config-panel cfg-form-only">
                   <h4>Extractor Provider</h4>
                   <div class="config-grid">
                     <div>
@@ -1297,11 +1312,20 @@
                     <div><label class="label" for="cfg_extractor_model">model</label><input id="cfg_extractor_model" placeholder="Qwen/Qwen3-8B" /></div>
                   </div>
                 </section>
-                <div class="row">
+                <div class="row cfg-form-only">
                   <button id="btn_cfg_load" type="button">读取配置</button>
                   <button id="btn_cfg_save" class="primary" type="button">保存配置</button>
                   <button id="btn_cfg_test" type="button">测试连通</button>
                 </div>
+                <section class="config-panel cfg-raw-only hidden">
+                  <h4>Raw config.json</h4>
+                  <textarea id="cfg_raw_json" spellcheck="false" placeholder="{&#10;  &quot;version&quot;: 1,&#10;  &quot;settings&quot;: {...},&#10;  &quot;models&quot;: {...}&#10;}"></textarea>
+                  <div class="row">
+                    <button id="btn_cfg_raw_load" type="button">读取 RAW</button>
+                    <button id="btn_cfg_raw_format" type="button">格式化</button>
+                    <button id="btn_cfg_raw_save" class="primary" type="button">保存 RAW</button>
+                  </div>
+                </section>
                 <div id="config_status" class="tiny muted config-status" aria-live="polite"></div>
               </div>
             </div>
@@ -1452,6 +1476,8 @@
       lang:"en",
       page:"chat",
       sending:false,
+      configMode:"form",
+      rawConfigText:"",
       modelConfig:{
         chat_provider:DEFAULT_CHAT_PROVIDER,
         chat_model:"",
@@ -2864,35 +2890,111 @@
       qs("graph_editor").value=query;
       runGraphQuery();
     }
-
+    function applyModelConfig(cfg){
+      state.modelConfig=cfg;
+      qs("cfg_chat_provider").value=cfg.chat_provider||DEFAULT_CHAT_PROVIDER;
+      qs("cfg_chat_model").value=cfg.chat_model||"";
+      qs("cfg_chat_base_url").value=cfg.chat_base_url||"";
+      qs("cfg_chat_api_key").value=cfg.chat_api_key||"";
+      qs("cfg_embedding_provider").value=cfg.embedding_provider||"openai";
+      qs("cfg_embed_base_url").value=cfg.embedding_base_url||"";
+      qs("cfg_embed_api_key").value=cfg.embedding_api_key||"";
+      qs("cfg_embed_model").value=cfg.embedding_model||"";
+      qs("cfg_extractor_provider").value=cfg.extractor_provider||"chat_model";
+      qs("cfg_extractor_base_url").value=cfg.extractor_base_url||"";
+      qs("cfg_extractor_api_key").value=cfg.extractor_api_key||"";
+      qs("cfg_extractor_model").value=cfg.extractor_model||"";
+      renderConfigProviderEditors(cfg.chat_provider);
+      alignSessionsWithProviderConfig();
+      renderSessions();
+      renderChat();
+    }
+    function syncConfigModeUI(){
+      const isRaw=state.configMode==="raw";
+      qsa(".cfg-form-only").forEach((el)=>el.classList.toggle("hidden",isRaw));
+      qsa(".cfg-raw-only").forEach((el)=>el.classList.toggle("hidden",!isRaw));
+      qs("btn_cfg_mode_form").classList.toggle("active",!isRaw);
+      qs("btn_cfg_mode_raw").classList.toggle("active",isRaw);
+    }
+    async function setConfigMode(mode,{autoLoad=true}={}){
+      state.configMode=mode==="raw"?"raw":"form";
+      syncConfigModeUI();
+      if(!autoLoad)return;
+      if(state.configMode==="raw"){
+        await loadRawConfig();
+      }else{
+        await loadModelConfig();
+      }
+    }
     async function loadModelConfig(){
       const btn=qs("btn_cfg_load");
       buttonBusy(btn,true);
       try{
         const data=await api("/api/v1/model-config");
         const cfg=normalizeModelConfig(data.result||{});
-        state.modelConfig=cfg;
-        qs("cfg_chat_provider").value=cfg.chat_provider||DEFAULT_CHAT_PROVIDER;
-        qs("cfg_chat_model").value=cfg.chat_model||"";
-        qs("cfg_chat_base_url").value=cfg.chat_base_url||"";
-        qs("cfg_chat_api_key").value=cfg.chat_api_key||"";
-        qs("cfg_embedding_provider").value=cfg.embedding_provider||"openai";
-        qs("cfg_embed_base_url").value=cfg.embedding_base_url||"";
-        qs("cfg_embed_api_key").value=cfg.embedding_api_key||"";
-        qs("cfg_embed_model").value=cfg.embedding_model||"";
-        qs("cfg_extractor_provider").value=cfg.extractor_provider||"chat_model";
-        qs("cfg_extractor_base_url").value=cfg.extractor_base_url||"";
-        qs("cfg_extractor_api_key").value=cfg.extractor_api_key||"";
-        qs("cfg_extractor_model").value=cfg.extractor_model||"";
-        renderConfigProviderEditors(cfg.chat_provider);
-        alignSessionsWithProviderConfig();
-        renderSessions();
-        renderChat();
+        applyModelConfig(cfg);
         setConfigStatus("配置已加载");
         setGlobalStatus("model config loaded");
       }catch(err){
         setConfigStatus(String(err.message||"加载失败"),false);
         setGlobalStatus("load config failed",false);
+      }finally{
+        buttonBusy(btn,false);
+      }
+    }
+    async function loadRawConfig(){
+      const btn=qs("btn_cfg_raw_load");
+      buttonBusy(btn,true);
+      try{
+        const data=await api("/api/v1/config/raw");
+        const cfg=data?.result?.config||{};
+        const path=String(data?.result?.path||"config.json");
+        state.rawConfigText=JSON.stringify(cfg,null,2);
+        qs("cfg_raw_json").value=state.rawConfigText;
+        setConfigStatus(`RAW 已加载：${path}`);
+        setGlobalStatus("raw config loaded");
+      }catch(err){
+        setConfigStatus(String(err.message||"RAW 加载失败"),false);
+        setGlobalStatus("raw config load failed",false);
+      }finally{
+        buttonBusy(btn,false);
+      }
+    }
+    function formatRawConfig(){
+      const el=qs("cfg_raw_json");
+      try{
+        const parsed=JSON.parse(el.value||"{}");
+        el.value=JSON.stringify(parsed,null,2);
+      }catch(err){
+        setConfigStatus("RAW JSON 格式错误，无法格式化",false);
+      }
+    }
+    async function saveRawConfig(){
+      const btn=qs("btn_cfg_raw_save");
+      buttonBusy(btn,true);
+      try{
+        const text=qs("cfg_raw_json").value.trim();
+        const parsed=text?JSON.parse(text):{};
+        if(!parsed||typeof parsed!=="object"||Array.isArray(parsed)){
+          throw new Error("RAW config 必须是 JSON object");
+        }
+        const data=await api("/api/v1/config/raw",{method:"PUT",body:{config:parsed}});
+        const savedCfg=data?.result?.config||parsed;
+        const restartRequired=Boolean(data?.result?.restart_required);
+        state.rawConfigText=JSON.stringify(savedCfg,null,2);
+        qs("cfg_raw_json").value=state.rawConfigText;
+        applyModelConfig(normalizeModelConfig(savedCfg?.models||{}));
+        const msg=restartRequired
+          ? "RAW 已保存（含 settings 变更，建议重启服务）"
+          : "RAW 已保存（模型配置已热生效）";
+        setConfigStatus(msg,true);
+        setGlobalStatus(
+          restartRequired?"raw config saved (restart recommended)":"raw config saved",
+          true
+        );
+      }catch(err){
+        setConfigStatus(String(err.message||"RAW 保存失败"),false);
+        setGlobalStatus("raw config save failed",false);
       }finally{
         buttonBusy(btn,false);
       }
@@ -3092,9 +3194,14 @@
       });
 
       qs("cfg_chat_provider").addEventListener("change",(e)=>loadProviderEditor(e.target.value));
+      qs("btn_cfg_mode_form").addEventListener("click",()=>setConfigMode("form"));
+      qs("btn_cfg_mode_raw").addEventListener("click",()=>setConfigMode("raw"));
       qs("btn_cfg_load").addEventListener("click",loadModelConfig);
       qs("btn_cfg_save").addEventListener("click",saveModelConfig);
       qs("btn_cfg_test").addEventListener("click",testModelConfig);
+      qs("btn_cfg_raw_load").addEventListener("click",loadRawConfig);
+      qs("btn_cfg_raw_format").addEventListener("click",formatRawConfig);
+      qs("btn_cfg_raw_save").addEventListener("click",saveRawConfig);
       qs("ui_language").addEventListener("change",(e)=>setLanguage(e.target.value));
     }
 
@@ -3117,6 +3224,7 @@
       syncGraphEditorPlaceholder();
       setGraphStatus(t("graph.status.ready"));
       setConfigStatus("");
+      syncConfigModeUI();
       switchPage("chat");
       loadModelConfig();
       setGlobalStatus("ready");

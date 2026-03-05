@@ -39,6 +39,11 @@ class EmbeddingProviderProtocol(Protocol):
         ...
 
 
+class RerankProviderProtocol(Protocol):
+    def rerank(self, *, query: str, documents: list[str]) -> list[float]:
+        ...
+
+
 @dataclass(frozen=True)
 class MemorizeInput:
     message_id: str
@@ -91,6 +96,10 @@ class MemoryService:
         retrieval_verifier_min_confidence: float = 0.66,
         query_rewriter: QueryRewriterProtocol | None = None,
         query_rewriter_min_confidence: float = 0.62,
+        rerank_provider: RerankProviderProtocol | None = None,
+        rerank_trigger_k: int = 20,
+        rerank_top_n: int = 20,
+        rerank_timeout_ms: int = 220,
         phase4_reasoning_enabled: bool = True,
         temporal_rerank_weight: float = 0.35,
         multi_hop_max_queries: int = 3,
@@ -128,6 +137,10 @@ class MemoryService:
         self.query_rewriter_min_confidence = max(
             0.0, min(1.0, float(query_rewriter_min_confidence))
         )
+        self.rerank_provider = rerank_provider
+        self.rerank_trigger_k = max(2, int(rerank_trigger_k))
+        self.rerank_top_n = max(1, int(rerank_top_n))
+        self.rerank_timeout_ms = max(60, int(rerank_timeout_ms))
         self.phase4_reasoning_enabled = bool(phase4_reasoning_enabled)
         self.temporal_rerank_weight = max(0.0, min(1.0, float(temporal_rerank_weight)))
         self.multi_hop_max_queries = max(1, int(multi_hop_max_queries))
@@ -177,7 +190,12 @@ class MemoryService:
         )
         raw_episode = str(payload.content or "").strip()
         extracted_episode = str(extracted.episode or "").strip()
-        if (
+        if self._should_preserve_raw_episode(
+            raw_episode=raw_episode,
+            extracted_episode=extracted_episode,
+        ):
+            episode_text = raw_episode
+        elif (
             self._looks_encoding_broken(extracted_episode)
             and not self._looks_encoding_broken(raw_episode)
             and raw_episode
@@ -275,6 +293,39 @@ class MemoryService:
             return True
         markers = ("Ã", "Â", "ä", "å", "æ", "ç", "è", "é", "ï", "ð", "椋", "炰", "锟")
         return any(m in raw for m in markers)
+
+    @classmethod
+    def _should_preserve_raw_episode(
+        cls,
+        *,
+        raw_episode: str,
+        extracted_episode: str,
+    ) -> bool:
+        raw_meta = cls._extract_metadata_dict(raw_episode)
+        if not raw_meta:
+            return False
+        extracted_meta = cls._extract_metadata_dict(extracted_episode)
+        if not extracted_meta:
+            return True
+        raw_keys = {str(k).strip() for k in raw_meta.keys() if str(k).strip()}
+        extracted_keys = {str(k).strip() for k in extracted_meta.keys() if str(k).strip()}
+        return bool(raw_keys - extracted_keys)
+
+    @staticmethod
+    def _extract_metadata_dict(text: str) -> dict[str, Any]:
+        for line in str(text or "").splitlines():
+            stripped = line.strip()
+            if not stripped.lower().startswith("[metadata]"):
+                continue
+            raw_json = stripped[len("[metadata]") :].strip()
+            if not raw_json:
+                return {}
+            try:
+                parsed = json.loads(raw_json)
+            except Exception:
+                return {}
+            return parsed if isinstance(parsed, dict) else {}
+        return {}
 
     def maybe_index_vector(self, policy: EffectivePolicy, episode: dict[str, Any]) -> dict[str, Any]:
         if not policy.vector_enabled:
@@ -1285,9 +1336,52 @@ class MemoryService:
             item["score"] = float(base) + 0.16 * float(overlap) + 0.04 * float(dual_bonus)
             weighted.append(item)
         weighted.sort(key=lambda x: float(x.get("score", 0.0)), reverse=True)
+        weighted = self._apply_model_rerank(query=query, rows=weighted)
         if self.phase4_reasoning_enabled and self._is_temporal_query(query):
             return self._rerank_temporal_rows(query=query, rows=weighted)
         return weighted
+
+    def _apply_model_rerank(self, *, query: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        provider = self.rerank_provider
+        if provider is None:
+            return rows
+        if len(rows) < self.rerank_trigger_k:
+            return rows
+        top_n = min(len(rows), self.rerank_top_n)
+        subset = [dict(x) for x in rows[:top_n]]
+        docs = [
+            " ".join(
+                [
+                    str(item.get("summary", "")),
+                    str(item.get("episode", "")),
+                    str(item.get("subject", "")),
+                ]
+            ).strip()
+            for item in subset
+        ]
+        start = time.perf_counter()
+        try:
+            scores = provider.rerank(query=query, documents=docs)
+        except Exception:
+            return rows
+        elapsed_ms = int((time.perf_counter() - start) * 1000)
+        if elapsed_ms > self.rerank_timeout_ms:
+            return rows
+        if not isinstance(scores, list):
+            return rows
+        for idx, item in enumerate(subset):
+            try:
+                rerank_score = float(scores[idx]) if idx < len(scores) else 0.0
+            except Exception:
+                rerank_score = 0.0
+            base = float(item.get("score", 0.0))
+            item["rerank_model_score"] = round(rerank_score, 4)
+            item["rerank_applied"] = True
+            item["rerank_latency_ms"] = elapsed_ms
+            item["score"] = float(base) + 0.12 * rerank_score
+            subset[idx] = item
+        subset.sort(key=lambda x: float(x.get("score", 0.0)), reverse=True)
+        return subset + rows[top_n:]
 
     def _should_skip_agentic_second_round(
         self,

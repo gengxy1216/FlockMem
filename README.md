@@ -7,16 +7,26 @@
 
 English | [简体中文](README.zh-CN.md)
 
-MiniMem is a lightweight, local-first long-term memory system designed for AI agents. Built with edge deployment in mind, it runs with a minimal memory footprint under 50MB, making it perfect for resource-constrained environments 🖥️
+MiniMem is a lightweight, local-first long-term memory system designed for AI agents. It is also built as a memory infrastructure layer for multi-agent collaboration. With edge deployment in mind, it runs with a minimal memory footprint under 50MB, making it suitable for resource-constrained environments 🖥️
 
 ## Why MiniMem? 💡
 
+- 🧱 **Multi-Agent Memory Infrastructure** - One shared memory substrate across agents, runtimes, and workflows
 - 🔄 **Local-first** - No cloud dependencies, runs entirely on your device
-- 🧠 **Knowledge Graph** - Rich graph-based memory with entities and relationships
-- ⚡ **Lightweight** - Under 50MB memory usage, perfect for edge devices
+- 🔍 **Hybrid Retrieval** - Text + Vector + Graph search with citation traces
+- 🧠 **Structured + Episodic Memory** - Entities, relationships, and conversation memories in one system
+- ⚡ **Lightweight** - Under 50MB memory usage, suitable for edge devices
+- 🔌 **Integration-ready** - REST API + MCP bridge + OpenClaw plugin
 - 🚀 **One-click Install** - Get started in seconds
-- 🔌 **Clean API** - Easy integration with any agent framework
-- 🔍 **Hybrid Retrieval** - Text + Vector + Graph search with citations
+
+## Key Positioning: Memory Infrastructure for Multi-Agent Collaboration
+
+MiniMem is not just a memory store for a single assistant. It provides:
+
+- Shared memory infrastructure for multiple agents via REST, MCP, and plugin bridges
+- Controlled collaboration boundaries with role-based, shared-group, and per-user memory strategies
+- Retrieval traces and citations for auditability and easier debugging
+- Local-first deployment with predictable cost, data ownership, and operational simplicity
 
 ## Quick Start ⚡
 
@@ -159,7 +169,7 @@ bash integrations/openclaw-plugin/install.sh
 Or install distributed plugin package:
 
 ```bash
-openclaw plugins install openclaw-plugin-minimem
+openclaw plugins install @gengxy1216/minimem-memory
 openclaw plugins enable minimem-memory
 ```
 

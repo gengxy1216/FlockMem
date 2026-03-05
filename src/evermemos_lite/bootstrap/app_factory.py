@@ -1,22 +1,23 @@
 ﻿from __future__ import annotations
 
-import json
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from evermemos_lite.api.routes.config_raw import router as config_raw_router
 from evermemos_lite.api.routes.chat import router as chat_router
 from evermemos_lite.api.routes.conversation_meta import router as conversation_meta_router
 from evermemos_lite.api.routes.health import router as health_router
 from evermemos_lite.api.routes.graph import router as graph_router
+from evermemos_lite.api.routes.ingest import router as ingest_router
 from evermemos_lite.api.routes.memory import router as memory_router
 from evermemos_lite.api.routes.model_config import router as model_config_router
 from evermemos_lite.api.routes.policy import router as policy_router
 from evermemos_lite.api.routes.status import router as status_router
 from evermemos_lite.api.routes.ui import router as ui_router
+from evermemos_lite.config.config_json import JsonConfigRepository
 from evermemos_lite.config.profiles import PROFILE_PRESETS
 from evermemos_lite.config.settings import LiteSettings
-from evermemos_lite.infra.sqlite.app_config_repository import AppConfigRepository
 from evermemos_lite.infra.graph.kuzu_store import KuzuGraphStore
 from evermemos_lite.infra.sqlite.conversation_meta_repository import ConversationMetaRepository
 from evermemos_lite.infra.sqlite.request_status_repository import RequestStatusRepository
@@ -25,12 +26,13 @@ from evermemos_lite.infra.sqlite.db import SQLiteEngine
 from evermemos_lite.infra.sqlite.init_schema import init_schema
 from evermemos_lite.infra.vector.lancedb_store import LanceVectorStore
 from evermemos_lite.service.chat_responder import ChatResponder
+from evermemos_lite.service.embedding_factory import build_embedding_provider
 from evermemos_lite.service.extractor_factory import build_memory_extractor
 from evermemos_lite.service.formation_enhancer import ChatModelFormationEnhancer
 from evermemos_lite.service.memory_service import MemoryService
-from evermemos_lite.service.openai_embedding import OpenAIEmbeddingProvider
 from evermemos_lite.service.policy_resolver import PolicyResolver
 from evermemos_lite.service.query_rewriter import ChatModelQueryRewriter
+from evermemos_lite.service.rerank_factory import build_rerank_provider
 from evermemos_lite.service.retrieval_verifier import ChatModelRetrievalVerifier
 from evermemos_lite.service.retrieval_mode_selector import (
     OpenAIRetrievalModeSelector,
@@ -39,102 +41,18 @@ from evermemos_lite.service.retrieval_mode_selector import (
 
 
 def create_app(settings: LiteSettings) -> FastAPI:
+    config_repo = JsonConfigRepository(settings.config_path)
+    settings = config_repo.get_effective_settings(settings)
+    runtime_model_config = config_repo.get_runtime_model_config(settings)
     engine = SQLiteEngine(settings.db_path)
     init_schema(engine)
-    app_config_repo = AppConfigRepository(engine)
-    config_keys = [
-        "chat_provider",
-        "chat_base_url",
-        "chat_api_key",
-        "chat_model",
-        "chat_provider_options",
-        "embedding_provider",
-        "embedding_base_url",
-        "embedding_api_key",
-        "embedding_model",
-        "extractor_provider",
-        "extractor_base_url",
-        "extractor_api_key",
-        "extractor_model",
-    ]
-    persisted = app_config_repo.get_many(config_keys)
-    raw_provider_options = persisted.get("chat_provider_options", "")
-    provider_options: dict[str, dict[str, str]] = {}
-    if raw_provider_options:
-        try:
-            parsed = json.loads(raw_provider_options)
-            if isinstance(parsed, dict):
-                provider_options = {
-                    str(k): {
-                        "base_url": str(v.get("base_url", "")),
-                        "api_key": str(v.get("api_key", "")),
-                        "model": str(v.get("model", "")),
-                    }
-                    for k, v in parsed.items()
-                    if isinstance(v, dict)
-                }
-        except Exception:
-            provider_options = {}
-    provider_options.pop("mock", None)
-    if not provider_options:
-        provider_options = {
-            "openai": {
-                "base_url": settings.chat_base_url,
-                "api_key": settings.chat_api_key,
-                "model": settings.chat_model,
-            },
-            "siliconflow": {
-                "base_url": settings.chat_base_url,
-                "api_key": settings.chat_api_key,
-                "model": settings.chat_model,
-            },
-        }
-    persisted_chat_provider = str(
-        persisted.get("chat_provider", settings.chat_provider)
-    ).strip() or settings.chat_provider
-    if persisted_chat_provider == "mock":
-        persisted_chat_provider = settings.chat_provider
-    if provider_options and persisted_chat_provider not in provider_options:
-        persisted_chat_provider = next(iter(provider_options.keys()))
-
-    runtime_model_config = {
-        "chat_provider": persisted_chat_provider,
-        "chat_base_url": persisted.get("chat_base_url", settings.chat_base_url),
-        "chat_api_key": persisted.get("chat_api_key", settings.chat_api_key),
-        "chat_model": persisted.get("chat_model", settings.chat_model),
-        "chat_provider_options": provider_options,
-        "embedding_provider": persisted.get(
-            "embedding_provider", settings.embedding_provider
-        ),
-        "embedding_base_url": persisted.get(
-            "embedding_base_url", settings.embedding_base_url
-        ),
-        "embedding_api_key": persisted.get(
-            "embedding_api_key", settings.embedding_api_key
-        ),
-        "embedding_model": persisted.get("embedding_model", settings.embedding_model),
-        "extractor_provider": persisted.get(
-            "extractor_provider", settings.extractor_provider
-        ),
-        "extractor_base_url": persisted.get(
-            "extractor_base_url", settings.extractor_base_url
-        ),
-        "extractor_api_key": persisted.get(
-            "extractor_api_key", settings.extractor_api_key
-        ),
-        "extractor_model": persisted.get("extractor_model", settings.extractor_model),
-    }
     runtime_policy_repo = RuntimePolicyRepository(engine=engine)
     policy_resolver = PolicyResolver(runtime_policy_repo)
     request_status_repo = RequestStatusRepository(engine)
     conversation_meta_repo = ConversationMetaRepository(engine)
     profile = PROFILE_PRESETS.get(settings.retrieval_profile, PROFILE_PRESETS["agentic"])
-    if runtime_model_config["embedding_provider"] != "openai":
-        raise ValueError("Only openai-compatible embedding provider is supported")
-    embedding_provider = OpenAIEmbeddingProvider(
-        base_url=runtime_model_config["embedding_base_url"],
-        api_key=runtime_model_config["embedding_api_key"],
-        model=runtime_model_config["embedding_model"],
+    embedding_provider = build_embedding_provider(
+        settings=settings, runtime_model_config=runtime_model_config
     )
 
     extractor = build_memory_extractor(
@@ -178,6 +96,9 @@ def create_app(settings: LiteSettings) -> FastAPI:
         model=phase1_model,
         enabled=settings.phase3_query_rewriter_enabled,
     )
+    rerank_provider = build_rerank_provider(
+        settings=settings, runtime_model_config=runtime_model_config
+    )
 
     vector_store = LanceVectorStore(
         settings.lancedb_dir,
@@ -204,6 +125,10 @@ def create_app(settings: LiteSettings) -> FastAPI:
         retrieval_verifier_min_confidence=settings.phase2_agentic_verifier_min_confidence,
         query_rewriter=query_rewriter,
         query_rewriter_min_confidence=settings.phase3_query_rewriter_min_confidence,
+        rerank_provider=rerank_provider,
+        rerank_trigger_k=settings.rerank_trigger_k,
+        rerank_top_n=settings.rerank_top_n,
+        rerank_timeout_ms=settings.rerank_timeout_ms,
         phase4_reasoning_enabled=settings.phase4_reasoning_enabled,
         temporal_rerank_weight=settings.phase4_temporal_rerank_weight,
         multi_hop_max_queries=settings.phase4_multi_hop_max_queries,
@@ -254,7 +179,7 @@ def create_app(settings: LiteSettings) -> FastAPI:
     app = FastAPI(title=settings.app_name, lifespan=lifespan)
     app.state.settings = settings
     app.state.sqlite_engine = engine
-    app.state.app_config_repo = app_config_repo
+    app.state.config_repo = config_repo
     app.state.runtime_model_config = runtime_model_config
     app.state.runtime_policy_repo = runtime_policy_repo
     app.state.policy_resolver = policy_resolver
@@ -268,7 +193,9 @@ def create_app(settings: LiteSettings) -> FastAPI:
 
     app.include_router(ui_router)
     app.include_router(health_router)
+    app.include_router(ingest_router)
     app.include_router(memory_router)
+    app.include_router(config_raw_router)
     app.include_router(chat_router)
     app.include_router(graph_router)
     app.include_router(model_config_router)

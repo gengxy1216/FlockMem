@@ -159,6 +159,72 @@ GET /api/v1/memories/groups?user_id=zhangsan&limit=100
 
 ---
 
+### Ingest
+
+#### Ingest Skill Output (Normalized Contract)
+
+```
+POST /api/v1/ingest/skill
+```
+
+用于接收上游 Agent/Skill 已解析的结构化内容，统一契约字段：
+`agent_id/sender/group_id/task_id/channel/trace_id`。
+
+**Request Body:**
+```json
+{
+  "source_type": "pdf",
+  "source_uri": "file:///tmp/demo.pdf",
+  "summary": "文档摘要",
+  "chunks": ["段落1", "段落2"],
+  "metadata": {"lang": "zh"},
+  "skill_name": "pdf",
+  "skill_version": "1.0.0",
+  "agent_id": "agent-a",
+  "sender": "agent-a",
+  "group_id": "default:agent-a",
+  "task_id": "task-001",
+  "channel": "channel-a",
+  "trace_id": "trace-001",
+  "role": "user",
+  "create_time": 1735603201
+}
+```
+
+**Response (`accepted=true`):**
+```json
+{
+  "status": "ok",
+  "message": "skill ingest completed",
+  "result": {
+    "accepted": true,
+    "skill_name": "pdf",
+    "trace_id": "trace-001",
+    "sender": "agent-a",
+    "group_id": "default:agent-a",
+    "ingested_count": 2,
+    "event_ids": ["evt-1", "evt-2"],
+    "source_type": "pdf"
+  }
+}
+```
+
+**Response (`accepted=false`, 非阻断提示):**
+```json
+{
+  "status": "ok",
+  "message": "skill is not in whitelist",
+  "result": {
+    "accepted": false,
+    "hint": "allowed skills: markitdown, pdf, pptx",
+    "skill_name": "unknown-skill",
+    "trace_id": "trace-abc"
+  }
+}
+```
+
+---
+
 ### Chat
 
 #### Simple Chat

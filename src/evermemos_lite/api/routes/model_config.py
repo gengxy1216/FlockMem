@@ -1,13 +1,18 @@
 from __future__ import annotations
 
-import json
-
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
 from evermemos_lite.service.extractor_factory import build_memory_extractor
 
 router = APIRouter(prefix="/api/v1/model-config", tags=["model-config"])
+
+
+class ModelRolePatch(BaseModel):
+    provider: str | None = None
+    base_url: str | None = None
+    api_key: str | None = None
+    model: str | None = None
 
 
 class ModelConfigPatch(BaseModel):
@@ -24,6 +29,14 @@ class ModelConfigPatch(BaseModel):
     extractor_base_url: str | None = None
     extractor_api_key: str | None = None
     extractor_model: str | None = None
+    rerank_provider: str | None = None
+    rerank_base_url: str | None = None
+    rerank_api_key: str | None = None
+    rerank_model: str | None = None
+    chat: ModelRolePatch | None = None
+    embedding: ModelRolePatch | None = None
+    extractor: ModelRolePatch | None = None
+    rerank: ModelRolePatch | None = None
 
 
 @router.get("")
@@ -47,8 +60,44 @@ async def update_model_config(request: Request, payload: ModelConfigPatch) -> di
         "chat_model",
         "chat_provider_options",
     }
+    role_to_keys = {
+        "chat": {
+            "provider": "chat_provider",
+            "base_url": "chat_base_url",
+            "api_key": "chat_api_key",
+            "model": "chat_model",
+        },
+        "embedding": {
+            "provider": "embedding_provider",
+            "base_url": "embedding_base_url",
+            "api_key": "embedding_api_key",
+            "model": "embedding_model",
+        },
+        "extractor": {
+            "provider": "extractor_provider",
+            "base_url": "extractor_base_url",
+            "api_key": "extractor_api_key",
+            "model": "extractor_model",
+        },
+        "rerank": {
+            "provider": "rerank_provider",
+            "base_url": "rerank_base_url",
+            "api_key": "rerank_api_key",
+            "model": "rerank_model",
+        },
+    }
     should_refresh_extractor = False
-    for key, value in payload.model_dump(exclude_none=True).items():
+    normalized_patch: dict[str, object] = {}
+    incoming = payload.model_dump(exclude_none=True)
+    for role, field_map in role_to_keys.items():
+        block = incoming.pop(role, None)
+        if not isinstance(block, dict):
+            continue
+        for src_key, dst_key in field_map.items():
+            if src_key in block:
+                incoming[dst_key] = block[src_key]
+
+    for key, value in incoming.items():
         if key == "chat_provider" and str(value).strip() == "mock":
             continue
         if key == "chat_provider_options" and isinstance(value, dict):
@@ -57,14 +106,29 @@ async def update_model_config(request: Request, payload: ModelConfigPatch) -> di
             should_refresh_extractor = True
         if key in extractor_dependent_chat_keys:
             should_refresh_extractor = True
-        request.app.state.runtime_model_config[key] = value
-        if isinstance(value, (dict, list)):
-            request.app.state.app_config_repo.upsert(
-                key, json.dumps(value, ensure_ascii=False)
-            )
-        else:
-            request.app.state.app_config_repo.upsert(key, str(value))
-        changed[key] = value
+        normalized_patch[key] = value
+    if normalized_patch:
+        changed = request.app.state.config_repo.patch_model_config(
+            settings=request.app.state.settings,
+            patch=normalized_patch,
+        )
+        runtime_model_config = request.app.state.config_repo.get_runtime_model_config(
+            request.app.state.settings
+        )
+        request.app.state.runtime_model_config.clear()
+        request.app.state.runtime_model_config.update(runtime_model_config)
+        request.app.state.chat_responder.base_url = str(
+            runtime_model_config.get("chat_base_url", "")
+        )
+        request.app.state.chat_responder.api_key = str(
+            runtime_model_config.get("chat_api_key", "")
+        )
+        request.app.state.chat_responder.model = str(
+            runtime_model_config.get("chat_model", "")
+        )
+        request.app.state.chat_responder.provider = str(
+            runtime_model_config.get("chat_provider", "openai")
+        )
     if should_refresh_extractor:
         request.app.state.memory_service.extractor = build_memory_extractor(
             settings=request.app.state.settings,

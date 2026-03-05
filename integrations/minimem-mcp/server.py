@@ -23,6 +23,16 @@ BASIC_PASSWORD = os.getenv("MINIMEM_BASIC_PASSWORD", "").strip()
 ALLOWED_RETRIEVE_METHODS = {"keyword", "vector", "hybrid", "rrf", "agentic"}
 ALLOWED_DECISION_MODES = {"static", "rule", "agent"}
 ALLOWED_RUNTIME_PROFILES = {"keyword", "hybrid", "agentic"}
+ALLOWED_SOURCE_TYPES = {
+    "skill_output",
+    "text",
+    "markdown",
+    "pdf",
+    "pptx",
+    "docx",
+    "html",
+    "json",
+}
 
 mcp = FastMCP(
     name=MCP_NAME,
@@ -168,6 +178,53 @@ def write_memory(
         "role": role,
     }
     return _request_json("POST", "/api/v1/memories", body=body)
+
+
+@mcp.tool(description="Ingest parsed skill output using MiniMem normalized ingest contract.")
+def ingest_skill_output(
+    source_type: str = "skill_output",
+    source_uri: str | None = None,
+    raw_text: str | None = None,
+    summary: str | None = None,
+    chunks: list[str] | None = None,
+    metadata: dict[str, Any] | None = None,
+    skill_name: str | None = None,
+    skill_version: str | None = None,
+    agent_id: str | None = None,
+    sender: str | None = None,
+    group_id: str | None = None,
+    task_id: str | None = None,
+    channel: str | None = None,
+    trace_id: str | None = None,
+    role: str = "user",
+    create_time: int | None = None,
+) -> dict[str, Any]:
+    st = str(source_type or "skill_output").strip().lower()
+    if st not in ALLOWED_SOURCE_TYPES:
+        raise ValueError(f"invalid source_type: {source_type}")
+    gid = group_id or DEFAULT_GROUP_ID
+    if not gid:
+        sid = sender or agent_id or "skill-agent"
+        gid = f"default:{sid}"
+    body = {
+        "source_type": st,
+        "source_uri": source_uri,
+        "raw_text": raw_text,
+        "summary": summary,
+        "chunks": list(chunks or []),
+        "metadata": dict(metadata or {}),
+        "skill_name": skill_name,
+        "skill_version": skill_version,
+        "agent_id": agent_id,
+        "sender": sender,
+        "group_id": gid,
+        "task_id": task_id,
+        "channel": channel,
+        "trace_id": trace_id,
+        "role": role,
+        "create_time": create_time,
+    }
+    return _request_json("POST", "/api/v1/ingest/skill", body=body)
 
 
 @mcp.tool(description="Search graph triples from MiniMem graph store.")
