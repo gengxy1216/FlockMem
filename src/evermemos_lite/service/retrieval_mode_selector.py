@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from urllib import error, request
 
 from evermemos_lite.domain.policy import RuntimePolicy
+from evermemos_lite.service.http_auth import build_auth_headers
 
 
 @dataclass(frozen=True)
@@ -118,10 +119,7 @@ class OpenAIRetrievalModeSelector:
         req = request.Request(
             url=url,
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.api_key}",
-            },
+            headers=build_auth_headers(self.api_key),
             method="POST",
         )
         try:

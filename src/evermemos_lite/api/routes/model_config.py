@@ -1,11 +1,21 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 
+from evermemos_lite.api.redaction import (
+    is_redacted_literal,
+    redact_sensitive,
+    restore_redacted,
+)
+from evermemos_lite.api.security import require_admin_access
 from evermemos_lite.service.extractor_factory import build_memory_extractor
 
-router = APIRouter(prefix="/api/v1/model-config", tags=["model-config"])
+router = APIRouter(
+    prefix="/api/v1/model-config",
+    tags=["model-config"],
+    dependencies=[Depends(require_admin_access)],
+)
 
 
 class ModelRolePatch(BaseModel):
@@ -41,7 +51,10 @@ class ModelConfigPatch(BaseModel):
 
 @router.get("")
 async def get_model_config(request: Request) -> dict:
-    return {"status": "ok", "result": dict(request.app.state.runtime_model_config)}
+    return {
+        "status": "ok",
+        "result": redact_sensitive(dict(request.app.state.runtime_model_config)),
+    }
 
 
 @router.put("")
@@ -101,7 +114,13 @@ async def update_model_config(request: Request, payload: ModelConfigPatch) -> di
         if key == "chat_provider" and str(value).strip() == "mock":
             continue
         if key == "chat_provider_options" and isinstance(value, dict):
+            value = restore_redacted(
+                value,
+                request.app.state.runtime_model_config.get("chat_provider_options"),
+            )
             value = {k: v for k, v in value.items() if str(k).strip() and str(k).strip() != "mock"}
+        if key.endswith("_api_key") and is_redacted_literal(value):
+            continue
         if key in extractor_keys:
             should_refresh_extractor = True
         if key in extractor_dependent_chat_keys:
@@ -134,7 +153,10 @@ async def update_model_config(request: Request, payload: ModelConfigPatch) -> di
             settings=request.app.state.settings,
             runtime_model_config=request.app.state.runtime_model_config,
         )
-    return {"status": "ok", "result": {"updated": changed}}
+    return {
+        "status": "ok",
+        "result": {"updated": redact_sensitive(changed)},
+    }
 
 
 @router.post("/test")
@@ -168,6 +190,6 @@ async def test_model_config(request: Request) -> dict:
             "provider": provider,
             "extractor_reachable": bool(extractor_reachable),
             "extractor_provider": extractor_provider,
-            "config": cfg,
+            "config": redact_sensitive(cfg),
         },
     }

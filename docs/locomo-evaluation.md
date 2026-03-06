@@ -47,11 +47,31 @@ python tools/run_locomo_eval.py \
 
 默认行为：
 
-- 使用临时 `LITE_DATA_DIR`，不污染现有本地数据
+- 默认使用按数据集指纹生成的持久化缓存目录（`MiniMem_data/benchmarks/eval_cache/...`）
+- 重复评测会复用已入库的 `message_id -> event_id` 映射，避免重复写入
+- 默认会在评测前做模型可用性预检（embedding；`agentic` 额外校验 verifier/rewriter 配置）
 - 默认 `--sample-size 20`，便于高频回归；传 `--sample-size 0` 可全量评测
 - `--ingest-profile keyword`，避免无 embedding key 时触发向量依赖
 - 默认不把 `user_id` 传入 `/search`，以兼容 LoCoMo 的多说话人对话
 - 输出总指标，`--report-out` 可落盘完整 case 级报告
+
+如需一次性临时评测（不复用缓存）可加：
+
+```bash
+--temp-data-dir
+```
+
+如需跳过模型可用性预检（不推荐）可加：
+
+```bash
+--skip-model-preflight
+```
+
+如需显式指定缓存目录可加：
+
+```bash
+--data-dir MiniMem_data/benchmarks/locomo/local_eval_data
+```
 
 ## 3) 官方 LoCoMo 数据一键流程（locomo10）
 

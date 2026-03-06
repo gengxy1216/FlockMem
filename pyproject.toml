@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "minimem"
-version = "0.1.0"
+version = "0.1.3"
 description = "Lightweight long-term memory system for local/edge AI agents"
 readme = "README.md"
 license = "MIT"
@@ -22,9 +22,13 @@ minimem = "evermemos_lite.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
+include-package-data = true
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+evermemos_lite = ["ui/*.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

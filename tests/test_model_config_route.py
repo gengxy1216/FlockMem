@@ -19,9 +19,12 @@ class ModelConfigRouteTests(unittest.TestCase):
     def test_put_model_config_persists_to_config_json_only(self) -> None:
         with WritableTempDir(ignore_cleanup_errors=True) as tmp:
             data_dir = Path(tmp) / "mem-data"
+            admin_token = "model-admin-token"
             env = {
                 "LITE_DATA_DIR": str(data_dir),
                 "LITE_CONFIG_DIR": str(Path(tmp) / "mem-config"),
+                "LITE_ADMIN_TOKEN": admin_token,
+                "LITE_ADMIN_ALLOW_LOCALHOST": "false",
                 "LITE_CHAT_PROVIDER": "openai",
                 "LITE_CHAT_BASE_URL": "https://chat.example/v1",
                 "LITE_CHAT_API_KEY": "chat-key",
@@ -37,6 +40,10 @@ class ModelConfigRouteTests(unittest.TestCase):
                 settings = LiteSettings.from_env()
             app = create_app(settings)
             client = TestClient(app)
+            headers = {"Authorization": f"Bearer {admin_token}"}
+
+            unauth_resp = client.put("/api/v1/model-config", json={"chat_model": "x"})
+            self.assertEqual(401, unauth_resp.status_code)
 
             resp = client.put(
                 "/api/v1/model-config",
@@ -49,6 +56,7 @@ class ModelConfigRouteTests(unittest.TestCase):
                         "model": "rerank-model-a",
                     },
                 },
+                headers=headers,
             )
             self.assertEqual(200, resp.status_code)
             body = resp.json()
@@ -60,12 +68,13 @@ class ModelConfigRouteTests(unittest.TestCase):
                 "https://rerank.example/v1",
                 body["result"]["updated"]["rerank_base_url"],
             )
-            self.assertEqual("rerank-key", body["result"]["updated"]["rerank_api_key"])
+            self.assertNotEqual("rerank-key", body["result"]["updated"]["rerank_api_key"])
+            self.assertEqual("[REDACTED]", str(body["result"]["updated"]["rerank_api_key"]))
             self.assertEqual(
                 "rerank-model-a", body["result"]["updated"]["rerank_model"]
             )
 
-            resp_get = client.get("/api/v1/model-config")
+            resp_get = client.get("/api/v1/model-config", headers=headers)
             self.assertEqual(200, resp_get.status_code)
             self.assertEqual(
                 "model-updated",
@@ -83,6 +92,11 @@ class ModelConfigRouteTests(unittest.TestCase):
                 "rerank-model-a",
                 resp_get.json()["result"]["rerank_model"],
             )
+            self.assertNotEqual(
+                "rerank-key",
+                resp_get.json()["result"]["rerank_api_key"],
+            )
+            self.assertEqual("[REDACTED]", str(resp_get.json()["result"]["rerank_api_key"]))
             self.assertIsInstance(resp_get.json()["result"].get("rerank"), dict)
 
             cfg = json.loads(settings.config_path.read_text(encoding="utf-8"))

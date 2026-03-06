@@ -5,6 +5,10 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Python 3.13+](https://img.shields.io/badge/Python-3.13+-blue.svg)](pyproject.toml)
 
+<p align="center">
+  <img src="docs/assets/minimem-banner.svg" alt="MiniMem banner" />
+</p>
+
 English | [简体中文](README.zh-CN.md)
 
 MiniMem is a lightweight, local-first long-term memory system designed for AI agents. It is also built as a memory infrastructure layer for multi-agent collaboration. With edge deployment in mind, it runs with a minimal memory footprint under 50MB, making it suitable for resource-constrained environments 🖥️
@@ -245,20 +249,29 @@ LITE_GRAPH_ENABLED=true
 # Retrieval profile
 LITE_RETRIEVAL_PROFILE=agentic
 
-# Hybrid vector persistence (partial to LanceDB)
-LITE_VECTOR_LANCEDB_ENABLED=true
-LITE_VECTOR_LANCEDB_MIN_IMPORTANCE=0.72
+  # Hybrid vector persistence (partial to LanceDB)
+  LITE_VECTOR_LANCEDB_ENABLED=true
+  LITE_VECTOR_LANCEDB_MIN_IMPORTANCE=0.72
 
-# Retrieval latency/recall tuning (edge-side)
-LITE_SEARCH_BUDGET_FACTOR=4
+  # Admin protection for sensitive config APIs
+  LITE_ADMIN_TOKEN=change-me
+  LITE_ADMIN_ALLOW_LOCALHOST=true
+  
+  # Retrieval latency/recall tuning (edge-side)
+  LITE_SEARCH_BUDGET_FACTOR=4
 LITE_SEARCH_MIN_PROBE_K=12
 LITE_KEYWORD_CONFIDENT_BEST_SCORE=9.0
 LITE_KEYWORD_CONFIDENT_KTH_SCORE=2.8
 LITE_SEMANTIC_VECTOR_BUDGET_CAP=32
 LITE_SEMANTIC_KEYWORD_BUDGET_CAP=16
-LITE_QUERY_EMBED_CACHE_SIZE=256
-LITE_QUERY_EMBED_CACHE_TTL_SEC=900
-```
+  LITE_QUERY_EMBED_CACHE_SIZE=256
+  LITE_QUERY_EMBED_CACHE_TTL_SEC=900
+  ```
+
+- Sensitive endpoints (`/api/v1/config/raw`, `/api/v1/model-config*`) accept
+  `Authorization: Bearer <LITE_ADMIN_TOKEN>` or `X-API-Key`.
+- When `LITE_ADMIN_TOKEN` is empty, localhost access is allowed by default
+  (`LITE_ADMIN_ALLOW_LOCALHOST=true`).
 
 Default local storage location (when `LITE_DATA_DIR` is not set):
 

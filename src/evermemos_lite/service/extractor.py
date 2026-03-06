@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from typing import Protocol
 from urllib import error, request
 
+from evermemos_lite.service.http_auth import build_auth_headers, normalize_api_key_token
+
 
 @dataclass(frozen=True)
 class ExtractedMemory:
@@ -35,7 +37,10 @@ class OpenAIMemoryExtractor:
         try:
             from openai import OpenAI  # type: ignore
 
-            self.client = OpenAI(base_url=base_url, api_key=api_key)
+            self.client = OpenAI(
+                base_url=base_url,
+                api_key=normalize_api_key_token(api_key),
+            )
         except Exception:
             self.client = None
         self._fallback = RuleMemoryExtractor()
@@ -119,10 +124,7 @@ class ChatModelMemoryExtractor:
         req = request.Request(
             url=url,
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.api_key}",
-            },
+            headers=build_auth_headers(self.api_key),
             method="POST",
         )
         try:

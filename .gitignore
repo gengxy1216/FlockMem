@@ -17,11 +17,37 @@ MiniMem_data/
 docs/github-growth-checklist.md
 docs/OPEN_SOURCE_PLAYBOOK.md
 docs/RELEASING.md
+docs/openclaw-semantic-hub-plan.md
+docs/*-20[0-9][0-9][0-1][0-9][0-3][0-9].md
+docs/*计划*.md
+docs/*清单*.md
+docs/*差距*.md
+docs/*补齐*.md
+docs/*指导*.md
 everMemOs.pdf
 tmp_paper.txt
 
 dist/
+build/
 tools/perf/results/
 tmp_test_runtime/
+.tmp_*
+.tmp_ci/
+.tmp_test/
+.tmp_probe*/
+
+# Local test artifacts / scratch outputs (keep test source files tracked)
+test/
+tests/tmp*/
+tests/**/tmp*/
+tests/.tmp*/
+tests/**/.tmp*/
+tests/**/*.log
+tests/**/*.out
+tests/**/*.err
+tests/**/*.db
+tests/**/*.db-*
+tests/**/*.sqlite
+tests/**/*.sqlite-*
 
 

@@ -33,6 +33,8 @@ class LiteSettings:
     app_name: str
     host: str
     port: int
+    admin_token: str
+    admin_allow_localhost: bool
     data_dir: Path
     config_path: Path
     db_path: Path
@@ -139,6 +141,8 @@ class LiteSettings:
             app_name=os.getenv("LITE_APP_NAME", "MiniMem"),
             host=os.getenv("LITE_HOST", "127.0.0.1"),
             port=int(os.getenv("LITE_PORT", "20195")),
+            admin_token=os.getenv("LITE_ADMIN_TOKEN", "").strip(),
+            admin_allow_localhost=_env_bool("LITE_ADMIN_ALLOW_LOCALHOST", True),
             data_dir=data_dir,
             config_path=config_path,
             db_path=db_path,

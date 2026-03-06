@@ -2,12 +2,18 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 
+from evermemos_lite.api.redaction import redact_sensitive, restore_redacted
+from evermemos_lite.api.security import require_admin_access
 from evermemos_lite.service.extractor_factory import build_memory_extractor
 
-router = APIRouter(prefix="/api/v1/config", tags=["config"])
+router = APIRouter(
+    prefix="/api/v1/config",
+    tags=["config"],
+    dependencies=[Depends(require_admin_access)],
+)
 
 
 class RawConfigPatch(BaseModel):
@@ -21,7 +27,7 @@ async def get_raw_config(request: Request) -> dict[str, Any]:
     return {
         "status": "ok",
         "result": {
-            "config": payload,
+            "config": redact_sensitive(payload),
             "path": str(config_repo.config_path),
         },
     }
@@ -31,9 +37,10 @@ async def get_raw_config(request: Request) -> dict[str, Any]:
 async def put_raw_config(request: Request, payload: RawConfigPatch) -> dict[str, Any]:
     config_repo = request.app.state.config_repo
     old_payload = config_repo.get_raw_config(request.app.state.settings)
+    merged_payload = restore_redacted(payload.config, old_payload)
     updated_payload = config_repo.replace_raw_config(
         bootstrap_settings=request.app.state.settings,
-        payload=payload.config,
+        payload=merged_payload,
     )
     runtime_model_config = config_repo.get_runtime_model_config(request.app.state.settings)
     request.app.state.runtime_model_config.clear()
@@ -65,6 +72,6 @@ async def put_raw_config(request: Request, payload: RawConfigPatch) -> dict[str,
             "saved": True,
             "restart_required": bool(restart_required),
             "path": str(config_repo.config_path),
-            "config": updated_payload,
+            "config": redact_sensitive(updated_payload),
         },
     }

@@ -6,6 +6,8 @@ from datetime import datetime
 from urllib import error, request
 from typing import Any
 
+from evermemos_lite.service.http_auth import build_auth_headers
+
 _TOKEN_RE = re.compile(r"[a-z0-9_]+|[\u4e00-\u9fff]{1,4}")
 _STOP_TOKENS = {"我", "你", "他", "她", "它", "吗", "呢", "啊", "呀", "的", "了"}
 _SLICE_LEN = 240
@@ -177,10 +179,7 @@ class ChatResponder:
         req = request.Request(
             url=url,
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-            },
+            headers=build_auth_headers(api_key),
             method="POST",
         )
         try:

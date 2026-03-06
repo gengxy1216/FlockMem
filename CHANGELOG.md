@@ -6,6 +6,14 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-03-06
+
+### Changed
+
+- Bumped and unified Python package version and OpenClaw plugin version to `0.1.3`.
+
+## [0.1.1] - 2026-03-05
+
 ### Added
 
 - Independent extractor provider configuration in runtime settings.
@@ -13,6 +21,14 @@ The format is based on Keep a Changelog.
 - Extractor connectivity checks in `/api/v1/model-config/test`.
 - Atomic-fact-aware retrieval for better memory recall.
 - Open-source community files: `LICENSE`, `CODE_OF_CONDUCT.md`.
+
+### Fixed
+
+- Admin-sensitive config routes now support bearer-based admin protection.
+- Sensitive config fields are redacted in API responses.
+- Config raw update flow preserves existing secrets when redacted placeholders are submitted.
+- Unified auth header handling across OpenAI-compatible chat/extractor/retrieval clients.
+- Wheel package now includes `evermemos_lite/ui/index.html`.
 
 ### Changed
 

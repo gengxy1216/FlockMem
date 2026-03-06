@@ -1,7 +1,7 @@
 {
   "id": "minimem-memory",
   "name": "MiniMem Memory Bridge",
-  "version": "0.1.1",
+  "version": "0.1.3",
   "description": "Lightweight OpenClaw plugin for MiniMem memory write/retrieve and cross-session context recall.",
   "author": "MiniMem",
   "kind": "memory",

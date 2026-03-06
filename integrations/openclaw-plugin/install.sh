@@ -225,7 +225,7 @@ install = installs.setdefault("minimem-memory", {})
 install["source"] = "path"
 install["sourcePath"] = source_path
 install["installPath"] = install_path
-install["version"] = "0.1.1"
+install["version"] = "0.1.3"
 install["installedAt"] = datetime.now(timezone.utc).isoformat()
 
 with open(config_path, "w", encoding="utf-8") as f:

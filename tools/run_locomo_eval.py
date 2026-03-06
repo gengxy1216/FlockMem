@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import random
@@ -51,6 +52,144 @@ def _sample_cases(
     rng = random.Random(int(sample_seed))
     indices = sorted(rng.sample(range(len(rows)), k=sample_size))
     return [rows[i] for i in indices]
+
+
+def _default_eval_cache_dir(
+    *, dataset: Path, ingest_profile: str, graph_enabled: bool
+) -> Path:
+    resolved = dataset.resolve()
+    stat = resolved.stat()
+    token = "|".join(
+        [
+            str(resolved),
+            str(int(stat.st_size)),
+            str(int(stat.st_mtime)),
+            ingest_profile,
+            "graph=1" if graph_enabled else "graph=0",
+        ]
+    )
+    digest = hashlib.sha1(token.encode("utf-8")).hexdigest()[:12]
+    safe_stem = re.sub(r"[^A-Za-z0-9._-]+", "_", resolved.stem) or "dataset"
+    return (
+        ROOT_DIR
+        / "MiniMem_data"
+        / "benchmarks"
+        / "eval_cache"
+        / f"{safe_stem}.{ingest_profile}.{digest}"
+    )
+
+
+def _load_dotenv_defaults(path: Path) -> None:
+    if not path.exists():
+        return
+    try:
+        raw = path.read_text(encoding="utf-8-sig")
+    except Exception:
+        return
+    for line in raw.splitlines():
+        text = line.strip()
+        if not text or text.startswith("#"):
+            continue
+        if text.lower().startswith("export "):
+            text = text[7:].strip()
+        if "=" not in text:
+            continue
+        key, value = text.split("=", 1)
+        k = key.strip()
+        if not k or k in os.environ:
+            continue
+        v = value.strip().strip("'").strip('"')
+        os.environ[k] = v
+
+
+def _component_ready(component: Any) -> tuple[bool, str]:
+    if component is None:
+        return False, "missing_component"
+    enabled = bool(getattr(component, "enabled", False))
+    base_url = str(getattr(component, "base_url", "") or "").strip()
+    api_key = str(getattr(component, "api_key", "") or "").strip()
+    model = str(getattr(component, "model", "") or "").strip()
+    if not enabled:
+        return False, "disabled"
+    missing: list[str] = []
+    if not base_url:
+        missing.append("base_url")
+    if not api_key:
+        missing.append("api_key")
+    if not model:
+        missing.append("model")
+    if missing:
+        return False, "missing:" + ",".join(missing)
+    return True, "ok"
+
+
+def _run_model_preflight(
+    *,
+    app: Any,
+    method: str,
+) -> dict[str, Any]:
+    memory_service = getattr(app.state, "memory_service", None)
+    checks: list[dict[str, Any]] = []
+    errors: list[str] = []
+
+    needs_vector = method in {"vector", "hybrid", "rrf", "agentic"}
+    needs_agentic_llm = method == "agentic"
+
+    if needs_vector:
+        embed_ok = False
+        embed_detail = "unknown"
+        try:
+            provider = getattr(memory_service, "embedding_provider", None)
+            vec = provider.embed("model preflight probe")
+            as_list = [float(x) for x in vec if isinstance(x, (int, float))]
+            embed_ok = bool(as_list)
+            embed_detail = f"dim={len(as_list)}" if embed_ok else "empty_embedding_vector"
+        except Exception as exc:
+            embed_ok = False
+            embed_detail = str(exc)[:180]
+        checks.append(
+            {
+                "name": "embedding_probe",
+                "required": True,
+                "ok": bool(embed_ok),
+                "detail": embed_detail,
+            }
+        )
+        if not embed_ok:
+            errors.append(f"embedding_probe_failed:{embed_detail}")
+
+    if needs_agentic_llm:
+        verifier = getattr(memory_service, "retrieval_verifier", None)
+        verifier_ok, verifier_detail = _component_ready(verifier)
+        checks.append(
+            {
+                "name": "agentic_verifier_config",
+                "required": True,
+                "ok": bool(verifier_ok),
+                "detail": verifier_detail,
+            }
+        )
+        if not verifier_ok:
+            errors.append(f"agentic_verifier_not_ready:{verifier_detail}")
+
+        rewriter = getattr(memory_service, "query_rewriter", None)
+        rewriter_ok, rewriter_detail = _component_ready(rewriter)
+        checks.append(
+            {
+                "name": "agentic_rewriter_config",
+                "required": True,
+                "ok": bool(rewriter_ok),
+                "detail": rewriter_detail,
+            }
+        )
+        if not rewriter_ok:
+            errors.append(f"agentic_rewriter_not_ready:{rewriter_detail}")
+
+    return {
+        "ok": len(errors) == 0,
+        "checks": checks,
+        "errors": errors,
+    }
 
 
 def _as_str(value: Any) -> str:
@@ -426,6 +565,7 @@ def run_eval(
     data_dir: Path | None,
     reuse_ingested: bool,
     skip_ingest_missing: bool,
+    skip_model_preflight: bool,
 ) -> dict[str, Any]:
     raw_rows = _load_jsonl(dataset)
     rows = _sample_cases(raw_rows, sample_size=sample_size, sample_seed=sample_seed)
@@ -456,14 +596,23 @@ def run_eval(
 
     env_patch = {
         "LITE_DATA_DIR": str(base_data_dir),
+        "LITE_CONFIG_PATH": str(base_data_dir / "eval.config.json"),
+        "LITE_DB_PATH": str(base_data_dir / "lite.db"),
+        "LITE_LANCEDB_DIR": str(base_data_dir / "lancedb"),
+        "LITE_GRAPH_DIR": str(base_data_dir / "kuzu"),
         "LITE_RETRIEVAL_PROFILE": ingest_profile,
         "LITE_GRAPH_ENABLED": "true" if graph_enabled else "false",
         "LITE_AGENT_POLICY_ENABLED": "false",
     }
+    preflight: dict[str, Any] = {"ok": False, "checks": [], "errors": []}
     try:
         with _temporary_env(env_patch):
             app = create_app(LiteSettings.from_env())
             db_path = Path(base_data_dir / "lite.db")
+            preflight = _run_model_preflight(app=app, method=method)
+            if not skip_model_preflight and not bool(preflight.get("ok")):
+                reasons = "; ".join(str(x) for x in preflight.get("errors", []))
+                raise RuntimeError(f"model preflight failed: {reasons}")
             with TestClient(app) as client:
                 for row in rows:
                     detail = _evaluate_case(
@@ -506,6 +655,8 @@ def run_eval(
     return {
         "status": "ok",
         "dataset": str(dataset),
+        "data_dir": str(base_data_dir),
+        "model_preflight": preflight,
         "method": method,
         "decision_mode": decision_mode,
         "top_k": top_k,
@@ -590,7 +741,15 @@ def main() -> None:
     parser.add_argument(
         "--data-dir",
         default="",
-        help="Optional persistent LITE_DATA_DIR. Empty means temp dir.",
+        help=(
+            "Optional persistent LITE_DATA_DIR. "
+            "Default is auto cache dir by dataset fingerprint."
+        ),
+    )
+    parser.add_argument(
+        "--temp-data-dir",
+        action="store_true",
+        help="Force temp LITE_DATA_DIR for one-off run (disables persistent cache).",
     )
     parser.add_argument(
         "--report-out",
@@ -607,11 +766,30 @@ def main() -> None:
         action="store_true",
         help="Do not ingest missing message_ids; search only over already persisted memories.",
     )
+    parser.add_argument(
+        "--skip-model-preflight",
+        action="store_true",
+        help="Skip model availability checks before evaluation.",
+    )
     args = parser.parse_args()
+
+    _load_dotenv_defaults(ROOT_DIR / ".env")
 
     dataset = Path(args.dataset).resolve()
     if not dataset.exists():
         raise SystemExit(f"dataset not found: {dataset}")
+
+    data_dir: Path | None
+    if args.temp_data_dir:
+        data_dir = None
+    elif args.data_dir:
+        data_dir = Path(args.data_dir).resolve()
+    else:
+        data_dir = _default_eval_cache_dir(
+            dataset=dataset,
+            ingest_profile=args.ingest_profile,
+            graph_enabled=bool(args.graph_enabled),
+        )
 
     report = run_eval(
         dataset=dataset,
@@ -625,9 +803,10 @@ def main() -> None:
         search_use_user_id=bool(args.search_use_user_id),
         ingest_profile=args.ingest_profile,
         graph_enabled=bool(args.graph_enabled),
-        data_dir=Path(args.data_dir).resolve() if args.data_dir else None,
+        data_dir=data_dir,
         reuse_ingested=not bool(args.no_reuse_ingested),
         skip_ingest_missing=bool(args.skip_ingest_missing),
+        skip_model_preflight=bool(args.skip_model_preflight),
     )
 
     if args.report_out:

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from urllib import error, request
 
+from evermemos_lite.service.http_auth import build_auth_headers
+
 
 class OpenAIEmbeddingProvider:
     def __init__(self, base_url: str, api_key: str, model: str) -> None:
@@ -62,16 +64,4 @@ class OpenAIEmbeddingProvider:
         return f"{base}/embeddings"
 
     def _build_headers(self, api_key: str) -> dict[str, str]:
-        token = api_key.strip()
-        headers = {"Content-Type": "application/json"}
-        lower = token.lower()
-        if lower.startswith("authorization:"):
-            auth_value = token.split(":", 1)[1].strip()
-            if auth_value:
-                headers["Authorization"] = auth_value
-            return headers
-        if lower.startswith(("bearer ", "basic ", "token ", "apikey ")):
-            headers["Authorization"] = token
-            return headers
-        headers["Authorization"] = f"Bearer {token}"
-        return headers
+        return build_auth_headers(api_key)
