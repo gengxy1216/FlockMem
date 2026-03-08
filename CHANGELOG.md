@@ -6,6 +6,13 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-03-08
+
+### Changed
+
+- Added collective-coordination metadata support and stronger ACL/replay safety on core collective flows.
+- Updated OpenClaw plugin envelope/routing support and raised plugin package version to `0.2.1`.
+
 ## [0.2.0] - 2026-03-08
 
 ### Changed
