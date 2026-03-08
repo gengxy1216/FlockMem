@@ -6,6 +6,13 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-03-08
+
+### Changed
+
+- Published package identity as `flockmem` with repository metadata pointing to `gengxy1216/FlockMem`.
+- Unified runtime/package version to `0.2.0` in both `pyproject.toml` and `src/flockmem/__init__.py`.
+
 ## [0.1.3] - 2026-03-06
 
 ### Changed

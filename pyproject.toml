@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "flockmem"
-version = "0.1.4"
+version = "0.2.0"
 description = "Lightweight long-term memory system for local/edge AI agents"
 readme = "README.md"
 license = "MIT"
@@ -27,6 +27,11 @@ test = [
 [project.scripts]
 flockmem = "flockmem.cli:main"
 minimem = "flockmem.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/gengxy1216/FlockMem"
+Repository = "https://github.com/gengxy1216/FlockMem"
+Issues = "https://github.com/gengxy1216/FlockMem/issues"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
