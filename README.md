@@ -1,4 +1,4 @@
-# <img src="docs/assets/flockmem-icon.svg" alt="FlockMem logo" width="32" /> FlockMem
+# <img src="docs/assets/flockmem-icon.svg" alt="FlockMem logo" width="52" /> FlockMem
 
 > Lightweight local-first memory system for AI agents ✨
 

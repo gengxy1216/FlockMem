@@ -1,4 +1,4 @@
-# <img src="docs/assets/flockmem-icon.svg" alt="FlockMem logo" width="32" /> FlockMem（中文）
+# <img src="docs/assets/flockmem-icon.svg" alt="FlockMem logo" width="52" /> FlockMem（中文）
 
 [English](README.md) | 简体中文
 
