@@ -7,6 +7,7 @@ param(
   [switch]$DisablePrimarySync,
   [switch]$ForcePrimarySync,
   [string]$FlockMemConfigPath = "",
+  [string[]]$CustomMemoryPath = @(),
   [switch]$TryRestartGateway
 )
 
@@ -75,6 +76,8 @@ $syncResult = [pscustomobject]@{
     baseUrl = ""
     model = ""
   }
+  openclawMemoryExtraPaths = @()
+  openclawMemoryExtraPathsStatus = "not_configured"
   senderMap = @{}
   channelGroupMap = @{}
   sharePolicy = @{}
@@ -87,16 +90,19 @@ from pathlib import Path
 
 args = sys.argv[1:]
 if len(args) < 4:
-    raise SystemExit("expected at least 4 args: config_path script_dir inherit_raw force_raw [minimem_config_path]")
+    raise SystemExit("expected at least 4 args: config_path script_dir inherit_raw force_raw [minimem_config_path] [custom_memory_paths...]")
 config_path, script_dir, inherit_raw, force_raw = args[:4]
 minimem_config_path = args[4] if len(args) >= 5 else ""
 if minimem_config_path == "__EMPTY__":
     minimem_config_path = ""
+custom_memory_paths = [str(item or "").strip() for item in args[5:] if str(item or "").strip()]
 
 result = {
     "status": "sync_unavailable",
     "warning": "",
     "snapshot": {"provider": "", "baseUrl": "", "model": ""},
+    "openclawMemoryExtraPaths": [],
+    "openclawMemoryExtraPathsStatus": "not_configured",
     "senderMap": {},
     "channelGroupMap": {},
     "sharePolicy": {},
@@ -140,6 +146,31 @@ try:
             return []
         return [seg.strip() for seg in text.replace(";", ",").split(",") if seg.strip()]
 
+    def _as_path_list(raw):
+        if isinstance(raw, list):
+            out = []
+            for item in raw:
+                text = _to_str(item)
+                if text and text not in out:
+                    out.append(text)
+            return out
+        text = _to_str(raw)
+        if not text:
+            return []
+        out = []
+        for seg in text.replace("\r", "\n").split("\n"):
+            item = seg.strip()
+            if item and item not in out:
+                out.append(item)
+        return out
+
+    def _ensure_dict(parent, key):
+        value = parent.get(key)
+        if not isinstance(value, dict):
+            value = {}
+            parent[key] = value
+        return value
+
     sender_map = {}
     for item in _iter_items(cfg.get("agents")):
         agent_id = _to_str(item.get("id") or item.get("agent_id") or item.get("agentId") or item.get("name"))
@@ -175,6 +206,21 @@ try:
             }
     result["sharePolicy"] = share_policy
 
+    agents_cfg = cfg.get("agents") if isinstance(cfg.get("agents"), dict) else {}
+    defaults_cfg = agents_cfg.get("defaults") if isinstance(agents_cfg.get("defaults"), dict) else {}
+    memory_search_cfg = defaults_cfg.get("memorySearch") if isinstance(defaults_cfg.get("memorySearch"), dict) else {}
+    merged_extra_paths = _as_path_list(memory_search_cfg.get("extraPaths"))
+    for item in custom_memory_paths:
+        if item not in merged_extra_paths:
+            merged_extra_paths.append(item)
+    if custom_memory_paths:
+        agents_cfg = _ensure_dict(cfg, "agents")
+        defaults_cfg = _ensure_dict(agents_cfg, "defaults")
+        memory_search_cfg = _ensure_dict(defaults_cfg, "memorySearch")
+        memory_search_cfg["extraPaths"] = merged_extra_paths
+    result["openclawMemoryExtraPaths"] = merged_extra_paths
+    result["openclawMemoryExtraPathsStatus"] = "configured" if merged_extra_paths else "not_configured"
+
     snap = detect_primary_model_snapshot(cfg)
     public_snap = to_public_primary_snapshot(snap)
     result["snapshot"] = {
@@ -204,7 +250,7 @@ print(json.dumps(result, ensure_ascii=False))
   $miniMemArg = if ([string]::IsNullOrWhiteSpace($FlockMemConfigPath)) { "__EMPTY__" } else { $FlockMemConfigPath }
   try {
     Set-Content -Path $tmpPy -Value $syncPy -Encoding UTF8
-    $syncJson = python $tmpPy $configPath $scriptDir $inheritPrimaryModel $forcePrimarySyncEnabled $miniMemArg 2> $tmpErr
+    $syncJson = python $tmpPy $configPath $scriptDir $inheritPrimaryModel $forcePrimarySyncEnabled $miniMemArg $CustomMemoryPath 2> $tmpErr
     if ($LASTEXITCODE -ne 0) {
       $errText = ""
       if (Test-Path $tmpErr) {
@@ -231,6 +277,8 @@ print(json.dumps(result, ensure_ascii=False))
 $senderMap = if ($null -ne $syncResult.senderMap) { $syncResult.senderMap } else { @{} }
 $channelGroupMap = if ($null -ne $syncResult.channelGroupMap) { $syncResult.channelGroupMap } else { @{} }
 $sharePolicy = if ($null -ne $syncResult.sharePolicy) { $syncResult.sharePolicy } else { @{} }
+$openclawMemoryExtraPaths = if ($null -ne $syncResult.openclawMemoryExtraPaths) { @($syncResult.openclawMemoryExtraPaths) } else { @() }
+$openclawMemoryExtraPathsStatus = [string]$syncResult.openclawMemoryExtraPathsStatus
 
 $slots.memory = "flockmem-memory"
 
@@ -257,6 +305,9 @@ Set-ObjectProperty -Object $entry -Name "config" -Value ([pscustomobject]@{
     model = [string]$syncResult.snapshot.model
   }
   primaryModelSyncStatus = [string]$syncResult.status
+  syncOpenClawMemoryExtraPaths = $true
+  openclawMemoryExtraPaths = $openclawMemoryExtraPaths
+  openclawMemoryExtraPathsStatus = $openclawMemoryExtraPathsStatus
   senderMap = $senderMap
   channelGroupMap = $channelGroupMap
   sharePolicy = $sharePolicy
@@ -269,7 +320,7 @@ $install = $installs."flockmem-memory"
 Set-ObjectProperty -Object $install -Name "source" -Value "path"
 Set-ObjectProperty -Object $install -Name "sourcePath" -Value $scriptDir
 Set-ObjectProperty -Object $install -Name "installPath" -Value $targetDir
-Set-ObjectProperty -Object $install -Name "version" -Value "0.2.0"
+Set-ObjectProperty -Object $install -Name "version" -Value "0.2.2"
 Set-ObjectProperty -Object $install -Name "installedAt" -Value ((Get-Date).ToUniversalTime().ToString("o"))
 
 $config | ConvertTo-Json -Depth 32 | Set-Content -Path $configPath -Encoding UTF8
@@ -288,6 +339,13 @@ if ($inheritPrimaryModel) {
 Write-Host "Primary model sync status: $($syncResult.status)"
 if ($syncResult.warning) {
   Write-Host "Primary model sync warning: $($syncResult.warning)"
+}
+Write-Host "OpenClaw memorySearch.extraPaths status: $openclawMemoryExtraPathsStatus"
+if ($openclawMemoryExtraPaths.Count -gt 0) {
+  Write-Host "OpenClaw custom memory paths:"
+  foreach ($pathItem in $openclawMemoryExtraPaths) {
+    Write-Host "  - $pathItem"
+  }
 }
 
 if ($TryRestartGateway) {

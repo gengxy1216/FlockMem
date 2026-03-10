@@ -43,6 +43,9 @@ type PluginConfig = {
   inheritPrimaryModel: boolean;
   primaryModelSnapshot: PrimaryModelSnapshot;
   primaryModelSyncStatus: string;
+  syncOpenClawMemoryExtraPaths: boolean;
+  openclawMemoryExtraPaths: string[];
+  openclawMemoryExtraPathsStatus: string;
   senderMap: Record<string, string>;
   channelGroupMap: Record<string, string>;
   sharePolicy: Record<string, SharePolicy>;
@@ -329,6 +332,28 @@ function normalizeAgentList(raw: unknown): string[] {
   );
 }
 
+function normalizePathList(raw: unknown): string[] {
+  if (Array.isArray(raw)) {
+    return Array.from(
+      new Set(
+        raw.map((item) => toStr(item)).filter(Boolean)
+      )
+    );
+  }
+  const text = toStr(raw);
+  if (!text) {
+    return [];
+  }
+  return Array.from(
+    new Set(
+      text
+        .split(/[\r\n;]+/)
+        .map((item) => item.trim())
+        .filter(Boolean)
+    )
+  );
+}
+
 function normalizeSharePolicy(raw: unknown): Record<string, SharePolicy> {
   if (!isObject(raw)) {
     return {};
@@ -434,6 +459,13 @@ function normalizeConfig(api: any): PluginConfig {
       model: toStr(primaryModelSnapshotRaw.model),
     },
     primaryModelSyncStatus: toStr(raw.primaryModelSyncStatus) || "not_synced",
+    syncOpenClawMemoryExtraPaths:
+      raw.syncOpenClawMemoryExtraPaths !== undefined
+        ? Boolean(raw.syncOpenClawMemoryExtraPaths)
+        : true,
+    openclawMemoryExtraPaths: normalizePathList(raw.openclawMemoryExtraPaths),
+    openclawMemoryExtraPathsStatus:
+      toStr(raw.openclawMemoryExtraPathsStatus) || "not_configured",
     senderMap: normalizeStringMap(raw.senderMap),
     channelGroupMap: normalizeStringMap(raw.channelGroupMap),
     sharePolicy: normalizeSharePolicy(raw.sharePolicy),
@@ -1836,6 +1868,6 @@ export default function minimemOpenclawPlugin(api: any) {
 
   return {
     name: "FlockMem Memory Bridge",
-    version: "0.2.0",
+    version: "0.2.2",
   };
 }

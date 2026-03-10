@@ -8,6 +8,7 @@ ENABLE_SHARED_MEMORY="false"
 INHERIT_PRIMARY_MODEL="true"
 FORCE_PRIMARY_SYNC="false"
 MINIMEM_CONFIG_PATH=""
+CUSTOM_MEMORY_PATHS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -37,6 +38,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --minimem-config)
       MINIMEM_CONFIG_PATH="${2:-}"
+      shift 2
+      ;;
+    --custom-memory-path)
+      CUSTOM_MEMORY_PATHS+=("${2:-}")
       shift 2
       ;;
     *)
@@ -73,13 +78,13 @@ mkdir -p "$EXT_DIR"
 rm -rf "$TARGET_DIR"
 cp -R "$SCRIPT_DIR" "$TARGET_DIR"
 
-python3 - "$CONFIG_PATH" "$SCRIPT_DIR" "$TARGET_DIR" "$BASE_URL" "$GROUP_STRATEGY" "$SHARED_GROUP_ID" "$INHERIT_PRIMARY_MODEL" "$FORCE_PRIMARY_SYNC" "$MINIMEM_CONFIG_PATH" <<'PY'
+python3 - "$CONFIG_PATH" "$SCRIPT_DIR" "$TARGET_DIR" "$BASE_URL" "$GROUP_STRATEGY" "$SHARED_GROUP_ID" "$INHERIT_PRIMARY_MODEL" "$FORCE_PRIMARY_SYNC" "$MINIMEM_CONFIG_PATH" "${CUSTOM_MEMORY_PATHS[@]}" <<'PY'
 import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-config_path, source_path, install_path, base_url, strategy, shared_group, inherit_primary_raw, force_sync_raw, minimem_config_raw = sys.argv[1:]
+config_path, source_path, install_path, base_url, strategy, shared_group, inherit_primary_raw, force_sync_raw, minimem_config_raw, *custom_memory_paths = sys.argv[1:]
 with open(config_path, "r", encoding="utf-8-sig") as f:
     cfg = json.load(f)
 
@@ -111,6 +116,31 @@ def _as_list(raw):
     if not text:
         return []
     return [seg.strip() for seg in text.replace(";", ",").split(",") if seg.strip()]
+
+def _as_path_list(raw):
+    if isinstance(raw, list):
+        out = []
+        for item in raw:
+            text = _to_str(item)
+            if text and text not in out:
+                out.append(text)
+        return out
+    text = _to_str(raw)
+    if not text:
+        return []
+    out = []
+    for seg in text.replace("\r", "\n").split("\n"):
+        item = seg.strip()
+        if item and item not in out:
+            out.append(item)
+    return out
+
+def _ensure_dict(parent, key):
+    value = parent.get(key)
+    if not isinstance(value, dict):
+        value = {}
+        parent[key] = value
+    return value
 
 def _collect_sender_map(cfg_obj):
     out = {}
@@ -152,6 +182,22 @@ def _collect_share_policy(cfg_obj):
             "writableAgents": writable,
         }
     return out
+
+def _merge_custom_memory_paths(cfg_obj, incoming_paths):
+    agents_cfg = cfg_obj.get("agents") if isinstance(cfg_obj.get("agents"), dict) else {}
+    defaults_cfg = agents_cfg.get("defaults") if isinstance(agents_cfg.get("defaults"), dict) else {}
+    memory_search_cfg = defaults_cfg.get("memorySearch") if isinstance(defaults_cfg.get("memorySearch"), dict) else {}
+    merged = _as_path_list(memory_search_cfg.get("extraPaths"))
+    for item in incoming_paths:
+        text = _to_str(item)
+        if text and text not in merged:
+            merged.append(text)
+    if incoming_paths:
+        agents_cfg = _ensure_dict(cfg_obj, "agents")
+        defaults_cfg = _ensure_dict(agents_cfg, "defaults")
+        memory_search_cfg = _ensure_dict(defaults_cfg, "memorySearch")
+        memory_search_cfg["extraPaths"] = merged
+    return merged
 
 plugins = cfg.setdefault("plugins", {})
 slots = plugins.setdefault("slots", {})
@@ -199,6 +245,8 @@ except Exception as exc:  # noqa: BLE001
 sender_map = _collect_sender_map(cfg)
 channel_group_map = _collect_channel_group_map(cfg)
 share_policy = _collect_share_policy(cfg)
+openclaw_memory_extra_paths = _merge_custom_memory_paths(cfg, custom_memory_paths)
+openclaw_memory_extra_paths_status = "configured" if openclaw_memory_extra_paths else "not_configured"
 
 entry = entries.setdefault("flockmem-memory", {})
 entry["enabled"] = True
@@ -216,6 +264,9 @@ entry["config"] = {
     "inheritPrimaryModel": inherit_primary_model,
     "primaryModelSnapshot": snapshot_public,
     "primaryModelSyncStatus": sync_status,
+    "syncOpenClawMemoryExtraPaths": True,
+    "openclawMemoryExtraPaths": openclaw_memory_extra_paths,
+    "openclawMemoryExtraPathsStatus": openclaw_memory_extra_paths_status,
     "senderMap": sender_map,
     "channelGroupMap": channel_group_map,
     "sharePolicy": share_policy,
@@ -225,13 +276,18 @@ install = installs.setdefault("flockmem-memory", {})
 install["source"] = "path"
 install["sourcePath"] = source_path
 install["installPath"] = install_path
-install["version"] = "0.2.0"
+install["version"] = "0.2.2"
 install["installedAt"] = datetime.now(timezone.utc).isoformat()
 
 with open(config_path, "w", encoding="utf-8") as f:
     json.dump(cfg, f, ensure_ascii=False, indent=2)
 
 print(f"Primary model sync status: {sync_status}")
+print(f"OpenClaw memorySearch.extraPaths status: {openclaw_memory_extra_paths_status}")
+if openclaw_memory_extra_paths:
+    print("OpenClaw custom memory paths:")
+    for item in openclaw_memory_extra_paths:
+        print(f"  - {item}")
 if sync_error:
     print(f"Primary model sync warning: {sync_error[:240]}", file=sys.stderr)
 PY

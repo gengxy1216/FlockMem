@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from flockmem.service.policy_resolver import ResolveInput
+from flockmem.service.chat_pipeline import execute_chat_query
 from flockmem.service.memory_service import ChatTurnInput
 
 router = APIRouter(prefix="/api/v1/chat", tags=["chat"])
@@ -238,126 +239,22 @@ def _filter_memories_for_prompt(query: str, rows: list[dict[str, Any]]) -> list[
 
 @router.post("/simple")
 async def simple_chat(payload: ChatRequest, request: Request) -> dict:
-    settings = request.app.state.settings
-    resolver = request.app.state.policy_resolver
-    memory_service = request.app.state.memory_service
-    chat_responder = request.app.state.chat_responder
-    model_config = request.app.state.runtime_model_config
-
-    effective = resolver.resolve(
-        ResolveInput(default_profile=settings.retrieval_profile, tenant_id="default")
-    )
-    raw_memories: list[dict[str, Any]] = []
-    if not _is_smalltalk(payload.query) or _has_memory_hint(payload.query):
-        raw_memories = memory_service.search(
-            policy=effective,
+    try:
+        result = await execute_chat_query(
+            request=request,
             query=payload.query,
             user_id=payload.user_id,
             group_id=payload.group_id,
             top_k=payload.top_k,
-        )
-    live_segment_memories: list[dict[str, Any]] = []
-    if payload.conversation_id:
-        live_segment_memories = memory_service.retrieve_live_segment_context(
-            conversation_id=str(payload.conversation_id),
-            query=payload.query,
-            limit=min(2, payload.top_k),
-        )
-    if live_segment_memories:
-        dedup: set[str] = set()
-        merged: list[dict[str, Any]] = []
-        for row in [*live_segment_memories, *raw_memories]:
-            key = str(row.get("id") or row.get("event_id") or row.get("summary") or row.get("episode"))
-            if not key or key in dedup:
-                continue
-            dedup.add(key)
-            merged.append(row)
-        raw_memories = merged
-    memories = _filter_memories_for_prompt(payload.query, raw_memories)
-    provider_options = (
-        model_config.get("chat_provider_options")
-        if isinstance(model_config.get("chat_provider_options"), dict)
-        else {}
-    )
-    default_provider = (
-        str(model_config.get("chat_provider") or "openai").strip() or "openai"
-    )
-    active_provider = str(payload.provider or default_provider).strip() or default_provider
-    if provider_options and active_provider not in provider_options:
-        if default_provider in provider_options:
-            active_provider = default_provider
-        else:
-            active_provider = next(iter(provider_options.keys()), "openai")
-    try:
-        response = chat_responder.respond(
-            query=payload.query,
-            memories=memories,
-            system_time=datetime.now().astimezone(),
-            provider=active_provider,
-            provider_options=provider_options,
-            model=str(model_config.get("chat_model", "")),
+            provider=payload.provider,
+            conversation_id=payload.conversation_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    auto_memory_saved = False
-    auto_memory_error: str | None = None
-    boundary_detected = False
-    user_id = (payload.user_id or "").strip() or "anonymous"
-    group_id = (payload.group_id or "").strip() or f"default:{user_id}"
-    conversation_id = (
-        str(payload.conversation_id or "").strip() or f"session-{user_id}-{group_id}"
-    )
-    try:
-        segment_result = await anyio.to_thread.run_sync(
-            partial(
-                memory_service.append_chat_turn,
-                payload=ChatTurnInput(
-                    conversation_id=conversation_id,
-                    user_id=user_id,
-                    group_id=group_id,
-                    user_text=payload.query,
-                    assistant_text=str(response.get("answer", "")),
-                    timestamp=int(time.time()),
-                ),
-                policy=effective,
-            )
-        )
-        auto_memory_saved = bool(segment_result.get("memory_saved"))
-        auto_memory_error = segment_result.get("memory_error")
-        boundary_detected = bool(segment_result.get("boundary_detected"))
-    except Exception as exc:  # best effort: chat should not fail because of memory persistence
-        auto_memory_error = str(exc)
-
-    title = payload.query.strip().replace("\n", " ")[:80] or "New Chat"
-    try:
-        request.app.state.conversation_meta_repo.upsert(
-            user_id=user_id,
-            group_id=group_id,
-            title=title,
-            conversation_id=conversation_id,
-        )
-    except Exception:
-        pass
     return {
         "status": "ok",
-        "result": {
-            "answer": response["answer"],
-            "citations": response["citations"],
-            "provider": response.get("provider", active_provider),
-            "model": response["model"],
-            "effective_policy": effective.to_dict(),
-            "memory_filter": {
-                "retrieved_count": len(raw_memories),
-                "used_count": len(memories),
-                "smalltalk_bypass": _is_smalltalk(payload.query) and not _has_memory_hint(payload.query),
-                "live_segment_count": len(live_segment_memories),
-            },
-            "memory_saved": auto_memory_saved,
-            "memory_error": auto_memory_error,
-            "boundary_detected": boundary_detected,
-            "conversation_id": conversation_id,
-        },
+        "result": result,
     }
 

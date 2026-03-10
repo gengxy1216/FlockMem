@@ -13,6 +13,7 @@ from flockmem.api.routes.graph import router as graph_router
 from flockmem.api.routes.ingest import router as ingest_router
 from flockmem.api.routes.memory import router as memory_router
 from flockmem.api.routes.model_config import router as model_config_router
+from flockmem.api.routes.panel import router as panel_router
 from flockmem.api.routes.policy import router as policy_router
 from flockmem.api.routes.status import router as status_router
 from flockmem.api.routes.ui import router as ui_router
@@ -35,6 +36,7 @@ from flockmem.service.formation_enhancer import ChatModelFormationEnhancer
 from flockmem.service.collective.core_loop_service import CoreLoopService
 from flockmem.service.memory_service import MemoryService
 from flockmem.service.policy_resolver import PolicyResolver
+from flockmem.service.panel_service import PanelService
 from flockmem.service.query_rewriter import ChatModelQueryRewriter
 from flockmem.service.rerank_factory import build_rerank_provider
 from flockmem.service.retrieval_verifier import ChatModelRetrievalVerifier
@@ -227,6 +229,7 @@ def create_app(settings: LiteSettings) -> FastAPI:
     app.state.chat_responder = chat_responder
     app.state.rule_retrieval_mode_selector = rule_selector
     app.state.agent_retrieval_mode_selector = agent_selector
+    app.state.panel_service = PanelService(engine)
 
     app.include_router(ui_router)
     app.include_router(health_router)
@@ -237,6 +240,7 @@ def create_app(settings: LiteSettings) -> FastAPI:
     app.include_router(chat_router)
     app.include_router(graph_router)
     app.include_router(model_config_router)
+    app.include_router(panel_router)
     app.include_router(conversation_meta_router)
     app.include_router(policy_router)
     app.include_router(status_router)

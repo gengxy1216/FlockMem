@@ -73,6 +73,50 @@ Default installation keeps config minimal and practical:
 
 This means most users can start without editing config.
 
+## OpenClaw 3.7 Custom Memory Support
+
+OpenClaw 3.7 adds custom memory paths under `agents.defaults.memorySearch.extraPaths`.
+
+Official config shape:
+
+```json5
+{
+  "agents": {
+    "defaults": {
+      "memorySearch": {
+        "extraPaths": ["../team-docs", "/srv/shared-notes/overview.md"]
+      }
+    }
+  }
+}
+```
+
+FlockMem plugin `0.2.2` now adapts to that interface:
+
+- install scripts preserve existing `agents.defaults.memorySearch` settings
+- install scripts merge any provided custom paths into `extraPaths`
+- plugin config mirrors the synced paths for UI/debug visibility
+
+Examples:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File integrations/openclaw-plugin/install.ps1 `
+  -CustomMemoryPath "..\\team-docs" `
+  -CustomMemoryPath "C:\\shared\\overview.md"
+```
+
+```bash
+bash integrations/openclaw-plugin/install.sh \
+  --custom-memory-path ../team-docs \
+  --custom-memory-path /srv/shared-notes/overview.md
+```
+
+Notes:
+
+- The plugin only touches `agents.defaults.memorySearch.extraPaths`.
+- Existing `memorySearch.provider`, `memorySearch.store`, `memorySearch.sync`, and other native OpenClaw settings are preserved.
+- Native OpenClaw memory indexing and FlockMem API-backed memory recall can run together.
+
 ## OpenClaw Primary Model Sync
 
 Install scripts now do an install-time sync:
