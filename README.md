@@ -101,6 +101,10 @@ http://127.0.0.1:20195/ui
 | 🕸️ **Graph Search** | Explore entity relationships in knowledge graph |
 | 💬 **Chat with Memory** | Context-aware conversations with retrieval traces |
 | ⚙️ **Runtime Config** | Change providers and settings on-the-fly |
+| 🤝 **Multi-Agent Embeddable** | Native support for OpenClaw, Codex, iFlow, Qwen Code, Nanobot and more |
+| 🔗 **Collective API** | Shared knowledge with ingest/context/feedback for multi-agent collaboration |
+| 📦 **Envelope Passthrough** | 7-field envelope (coordination_mode, runtime_id, agent_id, subagent_id, team_id, session_id) |
+| 🚀 **Runtime Extensible** | No whitelist restriction - any runtime_id supported |
 
 ## API Overview 📡
 

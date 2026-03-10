@@ -111,6 +111,20 @@ flockmem
 - `GET/PUT /api/v1/model-config`
 - `POST /api/v1/model-config/test`
 
+## 特性概览
+
+| 特性 | 说明 |
+|------|------|
+| 📝 **记忆存储** | 存储和管理对话记忆 |
+| 🔎 **语义检索** | 基于向量相似度查找相关记忆 |
+| 🕸️ **图谱检索** | 探索知识图谱中的实体关系 |
+| 💬 **带记忆对话** | 支持检索轨迹的上下文对话 |
+| ⚙️ **运行时配置** | 动态切换模型和参数 |
+| 🤝 **多Agent可嵌入** | 原生支持 OpenClaw、Codex、iFlow、Qwen Code、Nanobot 等 |
+| 🔗 **Collective API** | 面向多智能体协同的知识共享（ingest/context/feedback） |
+| 📦 **Envelope透传** | 7字段协调信息透传（coordination_mode、runtime_id、agent_id 等） |
+| 🚀 **Runtime扩展** | 无白名单限制，支持任意 runtime_id |
+
 ## API 概览
 
 - 健康检查：`GET /health`
@@ -118,6 +132,7 @@ flockmem
 - 检索记忆：`GET /api/v1/memories/search`
 - 对话：`POST /api/v1/chat/simple`
 - 图谱：`GET /api/v1/graph/search`、`GET /api/v1/graph/neighbors`
+- 多智能体协同：`POST /api/v1/collective/ingest`、`POST /api/v1/collective/context`、`POST /api/v1/collective/feedback`
 
 ## MCP 集成
 
